@@ -4,12 +4,21 @@ import Combine
 import Foundation
 
 struct HotkeyShortcut: Codable, Hashable {
+    static let supportedModifiers: CGEventFlags = [
+        .maskCommand,
+        .maskAlternate,
+        .maskControl,
+        .maskShift,
+        .maskSecondaryFn,
+        .maskAlphaShift
+    ]
+
     var keyCode: UInt16
     var modifiersRawValue: UInt64
 
     init(keyCode: CGKeyCode, modifiers: CGEventFlags = []) {
         self.keyCode = UInt16(keyCode)
-        modifiersRawValue = modifiers.intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift]).rawValue
+        modifiersRawValue = modifiers.intersection(Self.supportedModifiers).rawValue
     }
 
     var cgKeyCode: CGKeyCode {
@@ -44,12 +53,14 @@ struct SVGAsset: Codable, Hashable, Identifiable {
 
 struct AppConfiguration: Codable, Equatable {
     var repositoryURL: String
+    var repositoryBranch: String?
     var svgAssets: [SVGAsset]
     var hotkeyAssignments: [String: HotkeyShortcut]
     var overlayDuration: TimeInterval
 
     static let `default` = AppConfiguration(
         repositoryURL: "",
+        repositoryBranch: nil,
         svgAssets: [],
         hotkeyAssignments: [:],
         overlayDuration: 1.2
@@ -141,6 +152,8 @@ final class AppSettings: ObservableObject {
     }
 
     @Published private(set) var isSyncingRepository = false
+    @Published private(set) var isLoadingRepositoryBranches = false
+    @Published private(set) var availableRepositoryBranches: [String] = []
     @Published private(set) var repositorySyncMessage: String?
 
     var onConfigurationChanged: ((AppConfiguration) -> Void)?
@@ -162,7 +175,21 @@ final class AppSettings: ObservableObject {
     }
 
     func updateRepositoryURL(_ value: String) {
-        configuration.repositoryURL = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard configuration.repositoryURL != trimmed else { return }
+
+        configuration.repositoryURL = trimmed
+        configuration.repositoryBranch = nil
+        availableRepositoryBranches = []
+    }
+
+    func updateRepositoryBranch(_ value: String?) {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmed, trimmed.isEmpty {
+            configuration.repositoryBranch = nil
+        } else {
+            configuration.repositoryBranch = trimmed
+        }
     }
 
     func updateOverlayDuration(_ duration: TimeInterval) {
@@ -197,6 +224,8 @@ final class AppSettings: ObservableObject {
         if shortcut.hasModifier(.maskAlternate) { parts.append("Opt") }
         if shortcut.hasModifier(.maskControl) { parts.append("Ctrl") }
         if shortcut.hasModifier(.maskShift) { parts.append("Shift") }
+        if shortcut.hasModifier(.maskSecondaryFn) { parts.append("Fn") }
+        if shortcut.hasModifier(.maskAlphaShift) { parts.append("Caps") }
 
         let keyTitle = KeyChoice.all.first(where: { UInt16($0.keyCode) == shortcut.keyCode })?.title ?? "KeyCode \(shortcut.keyCode)"
         parts.append(keyTitle)
@@ -220,7 +249,11 @@ final class AppSettings: ObservableObject {
             guard let self else { return }
 
             do {
-                let assets = try await syncService.sync(repositoryURL: repoURL)
+                let syncResult = try await syncService.sync(
+                    repositoryURL: repoURL,
+                    preferredBranch: configuration.repositoryBranch
+                )
+                let assets = syncResult.assets
                 let knownIDs = Set(assets.map(\.id))
 
                 var assignments = configuration.hotkeyAssignments
@@ -237,13 +270,55 @@ final class AppSettings: ObservableObject {
                 }
 
                 configuration.svgAssets = assets
+                configuration.repositoryBranch = syncResult.branch
                 configuration.hotkeyAssignments = assignments
-                repositorySyncMessage = "Found \(assets.count) SVG file(s)."
+                if !availableRepositoryBranches.contains(syncResult.branch) {
+                    availableRepositoryBranches.append(syncResult.branch)
+                    availableRepositoryBranches.sort()
+                }
+                repositorySyncMessage = "Found \(assets.count) SVG file(s) on \(syncResult.branch)."
             } catch {
                 repositorySyncMessage = "Failed to sync SVGs: \(error.localizedDescription)"
             }
 
             isSyncingRepository = false
+        }
+    }
+
+    func refreshRepositoryBranches() {
+        guard !isLoadingRepositoryBranches else { return }
+
+        let repoURL = configuration.repositoryURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !repoURL.isEmpty else {
+            repositorySyncMessage = "Enter a GitHub repository URL first."
+            return
+        }
+
+        isLoadingRepositoryBranches = true
+        repositorySyncMessage = nil
+
+        Task { [weak self] in
+            guard let self else { return }
+
+            do {
+                let catalog = try await syncService.fetchBranches(repositoryURL: repoURL)
+                availableRepositoryBranches = catalog.branches
+
+                if let selectedBranch = configuration.repositoryBranch,
+                   !catalog.branches.contains(selectedBranch) {
+                    configuration.repositoryBranch = nil
+                }
+
+                if configuration.repositoryBranch == nil, let preferred = catalog.urlBranch ?? catalog.defaultBranch {
+                    configuration.repositoryBranch = preferred
+                }
+
+                repositorySyncMessage = "Loaded \(catalog.branches.count) branch\(catalog.branches.count == 1 ? "" : "es")."
+            } catch {
+                repositorySyncMessage = "Failed to load branches: \(error.localizedDescription)"
+            }
+
+            isLoadingRepositoryBranches = false
         }
     }
 

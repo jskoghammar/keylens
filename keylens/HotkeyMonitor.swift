@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 
 struct TriggerEvent {
     let assetID: String
@@ -66,7 +67,9 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
     func start() {
         guard eventTap == nil else { return }
 
-        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+        let keyDownMask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+        let flagsChangedMask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
+        let mask = keyDownMask | flagsChangedMask
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
@@ -102,13 +105,46 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
         bindings = Self.bindingsMap(from: configuration)
     }
 
-    private func handle(event: CGEvent) {
+    private func handle(event: CGEvent, type: CGEventType) {
+        if type == .flagsChanged, !Self.isModifierPress(event) {
+            return
+        }
+
         let eventKeyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-        let relevantFlags = event.flags.intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift])
+        let relevantFlags = event.flags.intersection(HotkeyShortcut.supportedModifiers)
         let shortcut = HotkeyShortcut(keyCode: eventKeyCode, modifiers: relevantFlags)
 
         guard let assetID = bindings[shortcut] else { return }
         onTrigger?(TriggerEvent(assetID: assetID))
+    }
+
+    private static func isModifierPress(_ event: CGEvent) -> Bool {
+        let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+        guard let changedModifier = modifierFlag(for: keyCode) else {
+            return true
+        }
+
+        let currentFlags = event.flags.intersection(HotkeyShortcut.supportedModifiers)
+        return currentFlags.contains(changedModifier)
+    }
+
+    private static func modifierFlag(for keyCode: CGKeyCode) -> CGEventFlags? {
+        switch Int(keyCode) {
+        case kVK_Command, kVK_RightCommand:
+            return .maskCommand
+        case kVK_Option, kVK_RightOption:
+            return .maskAlternate
+        case kVK_Control, kVK_RightControl:
+            return .maskControl
+        case kVK_Shift, kVK_RightShift:
+            return .maskShift
+        case kVK_Function:
+            return .maskSecondaryFn
+        case kVK_CapsLock:
+            return .maskAlphaShift
+        default:
+            return nil
+        }
     }
 
     private static func bindingsMap(from configuration: AppConfiguration) -> [HotkeyShortcut: String] {
@@ -140,12 +176,12 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
             return Unmanaged.passUnretained(event)
         }
 
-        guard type == .keyDown else {
+        guard type == .keyDown || type == .flagsChanged else {
             return Unmanaged.passUnretained(event)
         }
 
         source.hasWarnedAboutUserInputDisable = false
-        source.handle(event: event)
+        source.handle(event: event, type: type)
 
         return Unmanaged.passUnretained(event)
     }

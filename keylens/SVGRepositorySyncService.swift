@@ -46,6 +46,10 @@ private struct GitHubRepositoryResponse: Decodable {
     }
 }
 
+private struct GitHubBranchEntry: Decodable {
+    let name: String
+}
+
 private struct GitHubContentEntry: Decodable {
     let name: String
     let path: String
@@ -60,6 +64,17 @@ private struct GitHubContentEntry: Decodable {
     }
 }
 
+struct SVGSyncResult {
+    let assets: [SVGAsset]
+    let branch: String
+}
+
+struct RepositoryBranchCatalog {
+    let branches: [String]
+    let defaultBranch: String?
+    let urlBranch: String?
+}
+
 final class SVGRepositorySyncService {
     private let session: URLSession
     private let fileManager: FileManager
@@ -69,9 +84,9 @@ final class SVGRepositorySyncService {
         self.fileManager = fileManager
     }
 
-    func sync(repositoryURL: String) async throws -> [SVGAsset] {
+    func sync(repositoryURL: String, preferredBranch: String? = nil) async throws -> SVGSyncResult {
         let parsed = try parseRepositoryURL(repositoryURL)
-        let branch = try await resolveBranch(for: parsed)
+        let branch = try await resolveBranch(for: parsed, preferredBranch: preferredBranch)
         let entries = try await fetchImageEntries(owner: parsed.owner, repository: parsed.name, branch: branch)
 
         let svgEntries = entries
@@ -102,7 +117,28 @@ final class SVGRepositorySyncService {
             )
         }
 
-        return assets
+        return SVGSyncResult(assets: assets, branch: branch)
+    }
+
+    func fetchBranches(repositoryURL: String) async throws -> RepositoryBranchCatalog {
+        let parsed = try parseRepositoryURL(repositoryURL)
+        let repositoryInfo = try await fetchRepository(owner: parsed.owner, repository: parsed.name)
+        let branches = try await fetchBranchNames(owner: parsed.owner, repository: parsed.name)
+
+        var unique = Array(Set(branches)).sorted()
+        if !repositoryInfo.defaultBranch.isEmpty, !unique.contains(repositoryInfo.defaultBranch) {
+            unique.insert(repositoryInfo.defaultBranch, at: 0)
+        }
+
+        if let urlBranch = parsed.branch, !urlBranch.isEmpty, !unique.contains(urlBranch) {
+            unique.insert(urlBranch, at: 0)
+        }
+
+        return RepositoryBranchCatalog(
+            branches: unique,
+            defaultBranch: repositoryInfo.defaultBranch.isEmpty ? nil : repositoryInfo.defaultBranch,
+            urlBranch: parsed.branch
+        )
     }
 
     private func parseRepositoryURL(_ rawURL: String) throws -> ParsedRepository {
@@ -146,20 +182,32 @@ final class SVGRepositorySyncService {
         return ParsedRepository(owner: owner, name: repository, branch: branch)
     }
 
-    private func resolveBranch(for repository: ParsedRepository) async throws -> String {
+    private func resolveBranch(for repository: ParsedRepository, preferredBranch: String?) async throws -> String {
+        if let preferredBranch = preferredBranch?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !preferredBranch.isEmpty {
+            return preferredBranch
+        }
+
         if let branch = repository.branch, !branch.isEmpty {
             return branch
         }
 
-        let endpoint = "https://api.github.com/repos/\(repository.owner)/\(repository.name)"
+        let repositoryInfo = try await fetchRepository(owner: repository.owner, repository: repository.name)
+        guard !repositoryInfo.defaultBranch.isEmpty else {
+            throw SVGRepositorySyncError.missingDefaultBranch
+        }
+
+        return repositoryInfo.defaultBranch
+    }
+
+    private func fetchRepository(owner: String, repository: String) async throws -> GitHubRepositoryResponse {
+        let endpoint = "https://api.github.com/repos/\(owner)/\(repository)"
         var request = URLRequest(url: try makeURL(endpoint))
         request.addValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.addValue("Keylens", forHTTPHeaderField: "User-Agent")
 
         let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw SVGRepositorySyncError.invalidServerResponse
-        }
+        let http = try validateJSONResponse(response)
 
         if http.statusCode == 404 {
             throw SVGRepositorySyncError.repositoryNotFound
@@ -169,12 +217,37 @@ final class SVGRepositorySyncService {
             throw SVGRepositorySyncError.invalidServerResponse
         }
 
-        let repositoryInfo = try JSONDecoder().decode(GitHubRepositoryResponse.self, from: data)
-        guard !repositoryInfo.defaultBranch.isEmpty else {
-            throw SVGRepositorySyncError.missingDefaultBranch
+        return try JSONDecoder().decode(GitHubRepositoryResponse.self, from: data)
+    }
+
+    private func fetchBranchNames(owner: String, repository: String) async throws -> [String] {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "api.github.com"
+        components.path = "/repos/\(owner)/\(repository)/branches"
+        components.queryItems = [URLQueryItem(name: "per_page", value: "100")]
+
+        guard let url = components.url else {
+            throw SVGRepositorySyncError.invalidRepositoryURL
         }
 
-        return repositoryInfo.defaultBranch
+        var request = URLRequest(url: url)
+        request.addValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.addValue("Keylens", forHTTPHeaderField: "User-Agent")
+
+        let (data, response) = try await session.data(for: request)
+        let http = try validateJSONResponse(response)
+
+        if http.statusCode == 404 {
+            throw SVGRepositorySyncError.repositoryNotFound
+        }
+
+        guard (200 ... 299).contains(http.statusCode) else {
+            throw SVGRepositorySyncError.invalidServerResponse
+        }
+
+        let decoded = try JSONDecoder().decode([GitHubBranchEntry].self, from: data)
+        return decoded.map(\.name).filter { !$0.isEmpty }
     }
 
     private func fetchImageEntries(owner: String, repository: String, branch: String) async throws -> [GitHubContentEntry] {
@@ -193,9 +266,7 @@ final class SVGRepositorySyncService {
         request.addValue("Keylens", forHTTPHeaderField: "User-Agent")
 
         let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw SVGRepositorySyncError.invalidServerResponse
-        }
+        let http = try validateJSONResponse(response)
 
         if http.statusCode == 404 {
             throw SVGRepositorySyncError.missingImageDirectory
@@ -221,9 +292,7 @@ final class SVGRepositorySyncService {
         request.addValue("Keylens", forHTTPHeaderField: "User-Agent")
 
         let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw SVGRepositorySyncError.invalidServerResponse
-        }
+        let http = try validateJSONResponse(response)
 
         guard (200 ... 299).contains(http.statusCode) else {
             throw SVGRepositorySyncError.invalidServerResponse
@@ -261,5 +330,13 @@ final class SVGRepositorySyncService {
             throw SVGRepositorySyncError.invalidRepositoryURL
         }
         return url
+    }
+
+    private func validateJSONResponse(_ response: URLResponse) throws -> HTTPURLResponse {
+        guard let http = response as? HTTPURLResponse else {
+            throw SVGRepositorySyncError.invalidServerResponse
+        }
+
+        return http
     }
 }
