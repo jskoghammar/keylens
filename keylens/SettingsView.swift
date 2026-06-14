@@ -27,34 +27,58 @@ struct SettingsView: View {
     private var imageSourceCard: some View {
         SettingsCard(
             title: "Image Source",
-            subtitle: "Repository must contain keymap-drawer/img with SVG files."
+            subtitle: imageSourceSubtitle
         ) {
             VStack(alignment: .leading, spacing: 12) {
-                settingRow("Repository") {
-                    TextField("https://github.com/<owner>/<repo>", text: repositoryURLBinding)
-                        .textFieldStyle(.roundedBorder)
+                settingRow("Source") {
+                    Picker("", selection: svgSourceTypeBinding) {
+                        ForEach(SVGSourceType.allCases) { sourceType in
+                            Text(sourceType.title).tag(sourceType)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 360)
                 }
 
-                settingRow("Branch") {
-                    HStack(spacing: 10) {
-                        Picker("", selection: repositoryBranchBinding) {
-                            Text("Default").tag(String?.none)
-                            ForEach(branchOptions, id: \.self) { branch in
-                                Text(branch).tag(Optional(branch))
+                if settings.configuration.svgSourceType == .repository {
+                    settingRow("Repository") {
+                        TextField("https://github.com/<owner>/<repo>", text: repositoryURLBinding)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    settingRow("Branch") {
+                        HStack(spacing: 10) {
+                            Picker("", selection: repositoryBranchBinding) {
+                                Text("Default").tag(String?.none)
+                                ForEach(branchOptions, id: \.self) { branch in
+                                    Text(branch).tag(Optional(branch))
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                            .frame(width: 220, alignment: .leading)
+
+                            Button(settings.isLoadingRepositoryBranches ? "Loading…" : "Load Branches") {
+                                settings.refreshRepositoryBranches()
+                            }
+                            .disabled(settings.isLoadingRepositoryBranches || settings.configuration.repositoryURL.isEmpty)
+
+                            if settings.isLoadingRepositoryBranches {
+                                ProgressView()
+                                    .controlSize(.small)
                             }
                         }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                        .frame(width: 220, alignment: .leading)
+                    }
+                } else {
+                    settingRow("Directory") {
+                        HStack(spacing: 10) {
+                            TextField("/path/to/svg-directory", text: localDirectoryPathBinding)
+                                .textFieldStyle(.roundedBorder)
 
-                        Button(settings.isLoadingRepositoryBranches ? "Loading…" : "Load Branches") {
-                            settings.refreshRepositoryBranches()
-                        }
-                        .disabled(settings.isLoadingRepositoryBranches || settings.configuration.repositoryURL.isEmpty)
-
-                        if settings.isLoadingRepositoryBranches {
-                            ProgressView()
-                                .controlSize(.small)
+                            Button("Choose…") {
+                                chooseLocalDirectory()
+                            }
                         }
                     }
                 }
@@ -76,12 +100,18 @@ struct SettingsView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
 
-                    if let branch = settings.configuration.repositoryBranch {
-                        Text("Branch: \(branch)")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
+                    if settings.configuration.svgSourceType == .repository {
+                        if let branch = settings.configuration.repositoryBranch {
+                            Text("Branch: \(branch)")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("Branch: Default")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
                     } else {
-                        Text("Branch: Default")
+                        Text("Source: Local Directory")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -107,6 +137,17 @@ struct SettingsView: View {
                     )
                 }
 
+                settingRow("Location") {
+                    Picker("", selection: overlayPlacementBinding) {
+                        ForEach(OverlayPlacement.allCases) { placement in
+                            Text(placement.title).tag(placement)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 220, alignment: .leading)
+                }
+
                 Text("\(settings.configuration.overlayDuration, specifier: "%.1f") seconds")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -115,8 +156,39 @@ struct SettingsView: View {
     }
 
     private var hotkeyCard: some View {
-        SettingsCard(title: "Per-SVG Hotkeys") {
+        SettingsCard(title: "Hotkeys") {
             VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .center, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("End Active Hold")
+                                .font(.headline)
+
+                            Text("Use this for the firmware release sentinel, currently Right Shift. It only hides the current hold overlay and keeps latched toggles intact.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer(minLength: 12)
+
+                        HStack(spacing: 10) {
+                            globalClearHotkeyRecorderButton()
+
+                            Button("Clear") {
+                                settings.setClearHoldShortcut(nil)
+                                if recorder.recordingTarget == .clearHold {
+                                    recorder.stopRecording()
+                                }
+                            }
+                            .disabled(settings.clearHoldShortcut() == nil)
+                        }
+                    }
+
+                    if !settings.configuration.svgAssets.isEmpty {
+                        Divider()
+                    }
+                }
+
                 if settings.configuration.svgAssets.isEmpty {
                     Text("No SVG files synced yet.")
                         .foregroundStyle(.secondary)
@@ -128,12 +200,16 @@ struct SettingsView: View {
                                     Text(asset.fileName)
                                         .font(.headline)
 
-                                    if recorder.recordingAssetID == asset.id {
-                                        Text("Press a key or modifier now. Esc cancels. Delete clears.")
-                                            .font(.footnote)
-                                            .foregroundStyle(.secondary)
-                                    } else {
-                                        Text("Current: \(settings.hotkeyDescription(for: settings.shortcut(for: asset.id)))")
+                                    Picker("Behavior", selection: activationModeBinding(for: asset.id)) {
+                                        ForEach(HotkeyActivationMode.allCases) { mode in
+                                            Text(mode.title).tag(mode)
+                                        }
+                                    }
+                                    .pickerStyle(.segmented)
+                                    .frame(maxWidth: 360)
+
+                                    if settings.activationMode(for: asset.id) == .tapHold {
+                                        Text("Tap toggles. Hold for 0.5 seconds to show while pressed.")
                                             .font(.footnote)
                                             .foregroundStyle(.secondary)
                                     }
@@ -146,7 +222,7 @@ struct SettingsView: View {
 
                                     Button("Clear") {
                                         settings.setShortcut(nil, for: asset.id)
-                                        if recorder.recordingAssetID == asset.id {
+                                        if recorder.recordingTarget == .asset(asset.id) {
                                             recorder.stopRecording()
                                         }
                                     }
@@ -182,6 +258,15 @@ struct SettingsView: View {
         return options
     }
 
+    private var imageSourceSubtitle: String {
+        switch settings.configuration.svgSourceType {
+        case .repository:
+            return "Repository must contain keymap-drawer/img with SVG files."
+        case .localDirectory:
+            return "Choose a local directory containing SVG files."
+        }
+    }
+
     private func settingRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         HStack(alignment: .center, spacing: 12) {
             Text(title)
@@ -194,13 +279,13 @@ struct SettingsView: View {
     }
 
     private func hotkeyRecorderButton(for assetID: String) -> some View {
-        let isRecording = recorder.recordingAssetID == assetID
+        let isRecording = recorder.recordingTarget == .asset(assetID)
         let title = isRecording
             ? "Press keys…"
             : settings.hotkeyDescription(for: settings.shortcut(for: assetID))
 
         return Button {
-            recorder.startRecording(for: assetID) { shortcut in
+            recorder.startRecording(for: .asset(assetID)) { shortcut in
                 settings.setShortcut(shortcut, for: assetID)
             }
         } label: {
@@ -219,6 +304,53 @@ struct SettingsView: View {
             )
         }
         .buttonStyle(.plain)
+    }
+
+    private func globalClearHotkeyRecorderButton() -> some View {
+        let isRecording = recorder.recordingTarget == .clearHold
+        let title = isRecording
+            ? "Press keys…"
+            : settings.hotkeyDescription(for: settings.clearHoldShortcut())
+
+        return Button {
+            recorder.startRecording(for: .clearHold) { shortcut in
+                settings.setClearHoldShortcut(shortcut)
+            }
+        } label: {
+            HStack {
+                Text(title)
+                    .lineLimit(1)
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(minWidth: 230, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(isRecording ? Color.accentColor : Color.secondary.opacity(0.35), lineWidth: isRecording ? 2 : 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func chooseLocalDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.prompt = "Choose"
+
+        let currentPath = settings.configuration.localDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !currentPath.isEmpty {
+            let expanded = NSString(string: currentPath).expandingTildeInPath
+            panel.directoryURL = URL(fileURLWithPath: expanded, isDirectory: true)
+        }
+
+        if panel.runModal() == .OK, let selectedURL = panel.url {
+            settings.updateLocalDirectoryPath(selectedURL.path)
+        }
     }
 }
 
@@ -263,15 +395,20 @@ private struct SettingsCard<Content: View>: View {
 
 @MainActor
 private final class HotkeyRecorderController: ObservableObject {
-    @Published private(set) var recordingAssetID: String?
+    enum RecordingTarget: Equatable {
+        case asset(String)
+        case clearHold
+    }
+
+    @Published private(set) var recordingTarget: RecordingTarget?
 
     private var localMonitor: Any?
     private var onCapture: ((HotkeyShortcut?) -> Void)?
 
-    func startRecording(for assetID: String, onCapture: @escaping (HotkeyShortcut?) -> Void) {
+    func startRecording(for target: RecordingTarget, onCapture: @escaping (HotkeyShortcut?) -> Void) {
         stopRecording()
 
-        recordingAssetID = assetID
+        recordingTarget = target
         self.onCapture = onCapture
 
         localMonitor = NSEvent.addLocalMonitorForEvents(
@@ -287,7 +424,7 @@ private final class HotkeyRecorderController: ObservableObject {
         }
 
         localMonitor = nil
-        recordingAssetID = nil
+        recordingTarget = nil
         onCapture = nil
     }
 
@@ -298,7 +435,7 @@ private final class HotkeyRecorderController: ObservableObject {
     }
 
     private func handle(_ event: NSEvent) -> NSEvent? {
-        guard recordingAssetID != nil else {
+        guard recordingTarget != nil else {
             return event
         }
 
@@ -404,6 +541,13 @@ private final class HotkeyRecorderController: ObservableObject {
 }
 
 extension SettingsView {
+    private var svgSourceTypeBinding: Binding<SVGSourceType> {
+        Binding(
+            get: { settings.configuration.svgSourceType },
+            set: { settings.updateSVGSourceType($0) }
+        )
+    }
+
     private var repositoryURLBinding: Binding<String> {
         Binding(
             get: { settings.configuration.repositoryURL },
@@ -418,10 +562,31 @@ extension SettingsView {
         )
     }
 
+    private var localDirectoryPathBinding: Binding<String> {
+        Binding(
+            get: { settings.configuration.localDirectoryPath },
+            set: { settings.updateLocalDirectoryPath($0) }
+        )
+    }
+
     private var durationBinding: Binding<Double> {
         Binding(
             get: { settings.configuration.overlayDuration },
             set: { settings.updateOverlayDuration($0) }
+        )
+    }
+
+    private var overlayPlacementBinding: Binding<OverlayPlacement> {
+        Binding(
+            get: { settings.configuration.overlayPlacement },
+            set: { settings.updateOverlayPlacement($0) }
+        )
+    }
+
+    private func activationModeBinding(for assetID: String) -> Binding<HotkeyActivationMode> {
+        Binding(
+            get: { settings.activationMode(for: assetID) },
+            set: { settings.setActivationMode($0, for: assetID) }
         )
     }
 }

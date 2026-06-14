@@ -5,7 +5,13 @@ final class OverlayWindowController: NSWindowController {
     private let imageView = NSImageView()
     private let webView = WKWebView()
     private let dimmingView = NSView()
+    private let assetContainerView = NSView()
+    private let dimmingLayer = RadialDimmingLayer()
     private var hideTask: DispatchWorkItem?
+    private(set) var isVisible = false
+    private var currentPlacement: OverlayPlacement = .center
+
+    var onHide: (() -> Void)?
 
     init() {
         let initialFrame = NSScreen.main?.frame ?? .zero
@@ -32,21 +38,26 @@ final class OverlayWindowController: NSWindowController {
         dimmingView.frame = rootView.bounds
         dimmingView.autoresizingMask = [.width, .height]
         dimmingView.wantsLayer = true
-        dimmingView.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.25).cgColor
+        dimmingView.layer = dimmingLayer
+        dimmingLayer.frame = dimmingView.bounds
+        dimmingLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
         rootView.addSubview(dimmingView)
 
-        imageView.frame = rootView.bounds
+        assetContainerView.frame = rootView.bounds
+        rootView.addSubview(assetContainerView)
+
+        imageView.frame = assetContainerView.bounds
         imageView.autoresizingMask = [.width, .height]
         imageView.imageScaling = .scaleProportionallyUpOrDown
-        imageView.alphaValue = 0.85
-        rootView.addSubview(imageView)
+        imageView.alphaValue = 0.92
+        assetContainerView.addSubview(imageView)
 
-        webView.frame = rootView.bounds
+        webView.frame = assetContainerView.bounds
         webView.autoresizingMask = [.width, .height]
         webView.setValue(false, forKey: "drawsBackground")
         webView.enclosingScrollView?.drawsBackground = false
         webView.isHidden = true
-        rootView.addSubview(webView)
+        assetContainerView.addSubview(webView)
 
         window.orderOut(nil)
     }
@@ -61,29 +72,47 @@ final class OverlayWindowController: NSWindowController {
         webView.isHidden = true
     }
 
-    func showAsset(at localPath: String, for duration: TimeInterval) {
+    func showAsset(at localPath: String, placement: OverlayPlacement, duration: TimeInterval? = nil) {
         loadAsset(at: localPath)
-        show(for: duration)
+        show(placement: placement, duration: duration)
     }
 
-    func show(for duration: TimeInterval) {
+    func show(placement: OverlayPlacement, duration: TimeInterval? = nil) {
         hideTask?.cancel()
+        currentPlacement = placement
         updateFrameForCurrentScreen()
 
         guard let window else { return }
         window.alphaValue = 1.0
         window.orderFrontRegardless()
+        isVisible = true
+
+        guard let duration else {
+            hideTask = nil
+            return
+        }
 
         let task = DispatchWorkItem { [weak self] in
             self?.hide()
         }
-
         hideTask = task
         DispatchQueue.main.asyncAfter(deadline: .now() + max(0.1, duration), execute: task)
     }
 
+    func updatePlacement(_ placement: OverlayPlacement) {
+        currentPlacement = placement
+        guard isVisible else { return }
+        updateFrameForCurrentScreen()
+    }
+
     func hide() {
+        hideTask?.cancel()
+        hideTask = nil
+        guard isVisible else { return }
+
         window?.orderOut(nil)
+        isVisible = false
+        onHide?()
     }
 
     private func loadAsset(at localPath: String) {
@@ -145,6 +174,120 @@ final class OverlayWindowController: NSWindowController {
         let targetScreen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
         if let targetScreen {
             window.setFrame(targetScreen.frame, display: true)
+            layoutOverlay(in: targetScreen.frame.size)
         }
+    }
+
+    private func layoutOverlay(in screenSize: NSSize) {
+        let overlaySize = overlaySize(for: screenSize)
+        let center = currentPlacement.centerPoint(in: screenSize)
+
+        assetContainerView.frame = NSRect(
+            x: center.x - (overlaySize.width / 2.0),
+            y: center.y - (overlaySize.height / 2.0),
+            width: overlaySize.width,
+            height: overlaySize.height
+        )
+
+        dimmingLayer.frame = dimmingView.bounds
+        dimmingLayer.focusPoint = CGPoint(
+            x: center.x / max(screenSize.width, 1),
+            y: center.y / max(screenSize.height, 1)
+        )
+    }
+
+    private func overlaySize(for screenSize: NSSize) -> NSSize {
+        let width = min(max(screenSize.width * 0.44, 260), screenSize.width * 0.88)
+        let height = min(max(screenSize.height * 0.44, 180), screenSize.height * 0.88)
+        return NSSize(width: width, height: height)
+    }
+}
+
+private extension OverlayPlacement {
+    func centerPoint(in screenSize: NSSize) -> CGPoint {
+        let xFactor: CGFloat
+        let yFactor: CGFloat
+
+        switch self {
+        case .center:
+            xFactor = 0.5
+            yFactor = 0.5
+        case .topLeft:
+            xFactor = 0.25
+            yFactor = 0.75
+        case .topRight:
+            xFactor = 0.75
+            yFactor = 0.75
+        case .bottomLeft:
+            xFactor = 0.25
+            yFactor = 0.25
+        case .bottomRight:
+            xFactor = 0.75
+            yFactor = 0.25
+        }
+
+        return CGPoint(
+            x: screenSize.width * xFactor,
+            y: screenSize.height * yFactor
+        )
+    }
+}
+
+private final class RadialDimmingLayer: CALayer {
+    var focusPoint: CGPoint = CGPoint(x: 0.5, y: 0.5) {
+        didSet {
+            setNeedsDisplay()
+        }
+    }
+
+    override init() {
+        super.init()
+        needsDisplayOnBoundsChange = true
+    }
+
+    override init(layer: Any) {
+        super.init(layer: layer)
+        if let source = layer as? RadialDimmingLayer {
+            focusPoint = source.focusPoint
+        }
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        needsDisplayOnBoundsChange = true
+    }
+
+    override func draw(in context: CGContext) {
+        context.clear(bounds)
+
+        let center = CGPoint(
+            x: bounds.minX + (focusPoint.x * bounds.width),
+            y: bounds.minY + (focusPoint.y * bounds.height)
+        )
+        let radius = max(bounds.width, bounds.height) * 0.34
+
+        let colors = [
+            NSColor.black.withAlphaComponent(0.42).cgColor,
+            NSColor.black.withAlphaComponent(0.16).cgColor,
+            NSColor.clear.cgColor
+        ] as CFArray
+        let locations: [CGFloat] = [0.0, 0.32, 1.0]
+
+        guard let gradient = CGGradient(
+            colorsSpace: CGColorSpaceCreateDeviceRGB(),
+            colors: colors,
+            locations: locations
+        ) else {
+            return
+        }
+
+        context.drawRadialGradient(
+            gradient,
+            startCenter: center,
+            startRadius: 0,
+            endCenter: center,
+            endRadius: radius,
+            options: [.drawsAfterEndLocation]
+        )
     }
 }

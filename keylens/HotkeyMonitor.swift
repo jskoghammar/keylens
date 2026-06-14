@@ -1,8 +1,19 @@
 import AppKit
 import Carbon.HIToolbox
 
+enum TriggerTarget: Hashable {
+    case asset(String)
+    case clearHold
+}
+
 struct TriggerEvent {
-    let assetID: String
+    let target: TriggerTarget
+    let phase: TriggerPhase
+}
+
+enum TriggerPhase: Equatable {
+    case pressed
+    case released
 }
 
 protocol TriggerSource: AnyObject {
@@ -53,7 +64,12 @@ final class TriggerController {
 final class HotkeyTriggerSource: ConfigurableTriggerSource {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
-    private var bindings: [HotkeyShortcut: String]
+    private var bindings: [HotkeyShortcut: TriggerTarget]
+    private var pressedKeyCodes: Set<CGKeyCode> = []
+    private var pressedModifierKeyCodes: Set<CGKeyCode> = []
+    private var modifierTapCandidates: [CGKeyCode: Set<HotkeyShortcut>] = [:]
+    private var currentModifiers: CGEventFlags = []
+    private var activeShortcuts: Set<HotkeyShortcut> = []
 
     var onTrigger: ((TriggerEvent) -> Void)?
     var onStartError: ((String) -> Void)?
@@ -68,8 +84,9 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
         guard eventTap == nil else { return }
 
         let keyDownMask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+        let keyUpMask = CGEventMask(1 << CGEventType.keyUp.rawValue)
         let flagsChangedMask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
-        let mask = keyDownMask | flagsChangedMask
+        let mask = keyDownMask | keyUpMask | flagsChangedMask
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
@@ -99,33 +116,147 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
 
         runLoopSource = nil
         eventTap = nil
+        pressedKeyCodes.removeAll()
+        pressedModifierKeyCodes.removeAll()
+        modifierTapCandidates.removeAll()
+        currentModifiers = []
+        activeShortcuts.removeAll()
     }
 
     func update(configuration: AppConfiguration) {
         bindings = Self.bindingsMap(from: configuration)
+        activeShortcuts = activeShortcuts.intersection(Set(bindings.keys))
+        modifierTapCandidates.removeAll()
     }
 
     private func handle(event: CGEvent, type: CGEventType) {
-        if type == .flagsChanged, !Self.isModifierPress(event) {
+        let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+        let relevantFlags = event.flags.intersection(HotkeyShortcut.supportedModifiers)
+
+        switch type {
+        case .keyDown:
+            pressedKeyCodes.insert(keyCode)
+            modifierTapCandidates.removeAll()
+            currentModifiers = relevantFlags
+        case .keyUp:
+            pressedKeyCodes.remove(keyCode)
+            currentModifiers = relevantFlags
+        case .flagsChanged:
+            if let modifier = Self.modifierFlag(for: keyCode) {
+                if relevantFlags.contains(modifier) {
+                    invalidateModifierTapCandidates(except: keyCode)
+                    beginModifierTapCandidates(for: keyCode, flags: relevantFlags)
+                    pressedModifierKeyCodes.insert(keyCode)
+                } else {
+                    let tapCandidates = endModifierTapCandidates(for: keyCode)
+                    pressedModifierKeyCodes.remove(keyCode)
+                    if pressedKeyCodes.isEmpty {
+                        emitModifierTaps(tapCandidates)
+                    }
+                }
+            }
+            currentModifiers = relevantFlags
+        default:
             return
         }
 
-        let eventKeyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-        let relevantFlags = event.flags.intersection(HotkeyShortcut.supportedModifiers)
-        let shortcut = HotkeyShortcut(keyCode: eventKeyCode, modifiers: relevantFlags)
-
-        guard let assetID = bindings[shortcut] else { return }
-        onTrigger?(TriggerEvent(assetID: assetID))
+        emitTransitions()
     }
 
-    private static func isModifierPress(_ event: CGEvent) -> Bool {
-        let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-        guard let changedModifier = modifierFlag(for: keyCode) else {
-            return true
+    private func emitTransitions() {
+        let nextActiveShortcuts = Set(
+            bindings.keys.filter {
+                guard !Self.isModifierOnlyShortcut($0) else {
+                    return false
+                }
+                return Self.isShortcutActive(
+                    $0,
+                    pressedKeyCodes: pressedKeyCodes,
+                    pressedModifierKeyCodes: pressedModifierKeyCodes,
+                    modifiers: currentModifiers
+                )
+            }
+        )
+
+        let releasedShortcuts = Self.sortedShortcuts(activeShortcuts.subtracting(nextActiveShortcuts))
+        let pressedShortcuts = Self.sortedShortcuts(nextActiveShortcuts.subtracting(activeShortcuts))
+        activeShortcuts = nextActiveShortcuts
+
+        for shortcut in releasedShortcuts {
+            guard let target = bindings[shortcut] else { continue }
+            onTrigger?(TriggerEvent(target: target, phase: .released))
         }
 
-        let currentFlags = event.flags.intersection(HotkeyShortcut.supportedModifiers)
-        return currentFlags.contains(changedModifier)
+        for shortcut in pressedShortcuts {
+            guard let target = bindings[shortcut] else { continue }
+            onTrigger?(TriggerEvent(target: target, phase: .pressed))
+        }
+    }
+
+    private static func isShortcutActive(
+        _ shortcut: HotkeyShortcut,
+        pressedKeyCodes: Set<CGKeyCode>,
+        pressedModifierKeyCodes: Set<CGKeyCode>,
+        modifiers: CGEventFlags
+    ) -> Bool {
+        guard modifiers == shortcut.cgModifiers else {
+            return false
+        }
+
+        if let modifier = modifierFlag(for: shortcut.cgKeyCode) {
+            return shortcut.cgModifiers.contains(modifier) &&
+                pressedKeyCodes.isEmpty &&
+                pressedModifierKeyCodes.contains(shortcut.cgKeyCode)
+        }
+
+        return pressedKeyCodes.contains(shortcut.cgKeyCode)
+    }
+
+    private func beginModifierTapCandidates(for keyCode: CGKeyCode, flags: CGEventFlags) {
+        let candidates = bindings.keys.filter {
+            Self.isModifierOnlyShortcut($0) &&
+                $0.cgKeyCode == keyCode &&
+                $0.cgModifiers == flags
+        }
+
+        guard !candidates.isEmpty, pressedKeyCodes.isEmpty else {
+            return
+        }
+
+        modifierTapCandidates[keyCode] = Set(candidates)
+    }
+
+    private func endModifierTapCandidates(for keyCode: CGKeyCode) -> Set<HotkeyShortcut> {
+        modifierTapCandidates.removeValue(forKey: keyCode) ?? []
+    }
+
+    private func invalidateModifierTapCandidates(except keyCode: CGKeyCode) {
+        modifierTapCandidates = modifierTapCandidates.filter { $0.key == keyCode }
+    }
+
+    private func emitModifierTaps(_ shortcuts: Set<HotkeyShortcut>) {
+        for shortcut in Self.sortedShortcuts(shortcuts) {
+            guard let target = bindings[shortcut] else { continue }
+            onTrigger?(TriggerEvent(target: target, phase: .pressed))
+            onTrigger?(TriggerEvent(target: target, phase: .released))
+        }
+    }
+
+    private static func isModifierOnlyShortcut(_ shortcut: HotkeyShortcut) -> Bool {
+        guard let modifier = modifierFlag(for: shortcut.cgKeyCode) else {
+            return false
+        }
+
+        return shortcut.cgModifiers.contains(modifier)
+    }
+
+    private static func sortedShortcuts(_ shortcuts: Set<HotkeyShortcut>) -> [HotkeyShortcut] {
+        shortcuts.sorted {
+            if $0.keyCode == $1.keyCode {
+                return $0.modifiersRawValue < $1.modifiersRawValue
+            }
+            return $0.keyCode < $1.keyCode
+        }
     }
 
     private static func modifierFlag(for keyCode: CGKeyCode) -> CGEventFlags? {
@@ -147,12 +278,16 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
         }
     }
 
-    private static func bindingsMap(from configuration: AppConfiguration) -> [HotkeyShortcut: String] {
+    private static func bindingsMap(from configuration: AppConfiguration) -> [HotkeyShortcut: TriggerTarget] {
         let availableAssetIDs = Set(configuration.svgAssets.map(\.id))
 
-        var map: [HotkeyShortcut: String] = [:]
+        var map: [HotkeyShortcut: TriggerTarget] = [:]
         for (assetID, shortcut) in configuration.hotkeyAssignments where availableAssetIDs.contains(assetID) {
-            map[shortcut] = assetID
+            map[shortcut] = .asset(assetID)
+        }
+
+        if let clearHoldShortcut = configuration.clearHoldShortcut {
+            map[clearHoldShortcut] = .clearHold
         }
         return map
     }
@@ -176,7 +311,7 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
             return Unmanaged.passUnretained(event)
         }
 
-        guard type == .keyDown || type == .flagsChanged else {
+        guard type == .keyDown || type == .keyUp || type == .flagsChanged else {
             return Unmanaged.passUnretained(event)
         }
 

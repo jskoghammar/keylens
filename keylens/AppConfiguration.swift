@@ -3,47 +3,6 @@ import Carbon.HIToolbox
 import Combine
 import Foundation
 
-struct HotkeyShortcut: Codable, Hashable {
-    static let supportedModifiers: CGEventFlags = [
-        .maskCommand,
-        .maskAlternate,
-        .maskControl,
-        .maskShift,
-        .maskSecondaryFn,
-        .maskAlphaShift
-    ]
-
-    var keyCode: UInt16
-    var modifiersRawValue: UInt64
-
-    init(keyCode: CGKeyCode, modifiers: CGEventFlags = []) {
-        self.keyCode = UInt16(keyCode)
-        modifiersRawValue = modifiers.intersection(Self.supportedModifiers).rawValue
-    }
-
-    var cgKeyCode: CGKeyCode {
-        CGKeyCode(keyCode)
-    }
-
-    var cgModifiers: CGEventFlags {
-        CGEventFlags(rawValue: modifiersRawValue)
-    }
-
-    func hasModifier(_ modifier: CGEventFlags) -> Bool {
-        cgModifiers.contains(modifier)
-    }
-
-    func withModifier(_ modifier: CGEventFlags, enabled: Bool) -> HotkeyShortcut {
-        var modifiers = cgModifiers
-        if enabled {
-            modifiers.insert(modifier)
-        } else {
-            modifiers.remove(modifier)
-        }
-        return HotkeyShortcut(keyCode: cgKeyCode, modifiers: modifiers)
-    }
-}
-
 struct SVGAsset: Codable, Hashable, Identifiable {
     let id: String
     let fileName: String
@@ -51,20 +10,158 @@ struct SVGAsset: Codable, Hashable, Identifiable {
     let localFilePath: String
 }
 
+enum SVGSourceType: String, Codable, CaseIterable, Identifiable {
+    case repository
+    case localDirectory
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .repository:
+            return "GitHub Repository"
+        case .localDirectory:
+            return "Local Directory"
+        }
+    }
+}
+
+enum HotkeyActivationMode: String, Codable, CaseIterable, Identifiable {
+    case timed
+    case toggle
+    case tapHold
+    case oneShot
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .timed:
+            return "Time"
+        case .toggle:
+            return "Toggle"
+        case .tapHold:
+            return "Tap/Hold"
+        case .oneShot:
+            return "One Shot"
+        }
+    }
+}
+
+enum OverlayPlacement: String, Codable, CaseIterable, Identifiable {
+    case center
+    case topLeft
+    case topRight
+    case bottomLeft
+    case bottomRight
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .center:
+            return "Center"
+        case .topLeft:
+            return "Top Left"
+        case .topRight:
+            return "Top Right"
+        case .bottomLeft:
+            return "Bottom Left"
+        case .bottomRight:
+            return "Bottom Right"
+        }
+    }
+}
+
 struct AppConfiguration: Codable, Equatable {
+    var svgSourceType: SVGSourceType
     var repositoryURL: String
     var repositoryBranch: String?
+    var localDirectoryPath: String
     var svgAssets: [SVGAsset]
     var hotkeyAssignments: [String: HotkeyShortcut]
+    var hotkeyModes: [String: HotkeyActivationMode]
+    var clearHoldShortcut: HotkeyShortcut?
     var overlayDuration: TimeInterval
+    var overlayPlacement: OverlayPlacement
+
+    private enum CodingKeys: String, CodingKey {
+        case svgSourceType
+        case repositoryURL
+        case repositoryBranch
+        case localDirectoryPath
+        case svgAssets
+        case hotkeyAssignments
+        case hotkeyModes
+        case clearHoldShortcut
+        case overlayDuration
+        case overlayPlacement
+    }
 
     static let `default` = AppConfiguration(
+        svgSourceType: .repository,
         repositoryURL: "",
         repositoryBranch: nil,
+        localDirectoryPath: "",
         svgAssets: [],
         hotkeyAssignments: [:],
-        overlayDuration: 1.2
+        hotkeyModes: [:],
+        clearHoldShortcut: .firmwareReleaseSignal,
+        overlayDuration: 1.2,
+        overlayPlacement: .center
     )
+
+    init(
+        svgSourceType: SVGSourceType,
+        repositoryURL: String,
+        repositoryBranch: String?,
+        localDirectoryPath: String,
+        svgAssets: [SVGAsset],
+        hotkeyAssignments: [String: HotkeyShortcut],
+        hotkeyModes: [String: HotkeyActivationMode],
+        clearHoldShortcut: HotkeyShortcut?,
+        overlayDuration: TimeInterval,
+        overlayPlacement: OverlayPlacement
+    ) {
+        self.svgSourceType = svgSourceType
+        self.repositoryURL = repositoryURL
+        self.repositoryBranch = repositoryBranch
+        self.localDirectoryPath = localDirectoryPath
+        self.svgAssets = svgAssets
+        self.hotkeyAssignments = hotkeyAssignments
+        self.hotkeyModes = hotkeyModes
+        self.clearHoldShortcut = clearHoldShortcut
+        self.overlayDuration = overlayDuration
+        self.overlayPlacement = overlayPlacement
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        svgSourceType = try container.decodeIfPresent(SVGSourceType.self, forKey: .svgSourceType) ?? .repository
+        repositoryURL = try container.decodeIfPresent(String.self, forKey: .repositoryURL) ?? ""
+        repositoryBranch = try container.decodeIfPresent(String.self, forKey: .repositoryBranch)
+        localDirectoryPath = try container.decodeIfPresent(String.self, forKey: .localDirectoryPath) ?? ""
+        svgAssets = try container.decodeIfPresent([SVGAsset].self, forKey: .svgAssets) ?? []
+        hotkeyAssignments = try container.decodeIfPresent([String: HotkeyShortcut].self, forKey: .hotkeyAssignments) ?? [:]
+        hotkeyModes = try container.decodeIfPresent([String: HotkeyActivationMode].self, forKey: .hotkeyModes) ?? [:]
+        clearHoldShortcut = try container.decodeIfPresent(HotkeyShortcut.self, forKey: .clearHoldShortcut)
+        overlayDuration = try container.decodeIfPresent(TimeInterval.self, forKey: .overlayDuration) ?? 1.2
+        overlayPlacement = try container.decodeIfPresent(OverlayPlacement.self, forKey: .overlayPlacement) ?? .center
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(svgSourceType, forKey: .svgSourceType)
+        try container.encode(repositoryURL, forKey: .repositoryURL)
+        try container.encodeIfPresent(repositoryBranch, forKey: .repositoryBranch)
+        try container.encode(localDirectoryPath, forKey: .localDirectoryPath)
+        try container.encode(svgAssets, forKey: .svgAssets)
+        try container.encode(hotkeyAssignments, forKey: .hotkeyAssignments)
+        try container.encode(hotkeyModes, forKey: .hotkeyModes)
+        try container.encodeIfPresent(clearHoldShortcut, forKey: .clearHoldShortcut)
+        try container.encode(overlayDuration, forKey: .overlayDuration)
+        try container.encode(overlayPlacement, forKey: .overlayPlacement)
+    }
 }
 
 struct KeyChoice: Identifiable, Hashable {
@@ -174,6 +271,12 @@ final class AppSettings: ObservableObject {
         configuration = Self.loadConfiguration(defaults: defaults)
     }
 
+    func updateSVGSourceType(_ value: SVGSourceType) {
+        guard configuration.svgSourceType != value else { return }
+        configuration.svgSourceType = value
+        repositorySyncMessage = nil
+    }
+
     func updateRepositoryURL(_ value: String) {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard configuration.repositoryURL != trimmed else { return }
@@ -181,6 +284,12 @@ final class AppSettings: ObservableObject {
         configuration.repositoryURL = trimmed
         configuration.repositoryBranch = nil
         availableRepositoryBranches = []
+    }
+
+    func updateLocalDirectoryPath(_ value: String) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard configuration.localDirectoryPath != trimmed else { return }
+        configuration.localDirectoryPath = trimmed
     }
 
     func updateRepositoryBranch(_ value: String?) {
@@ -196,27 +305,67 @@ final class AppSettings: ObservableObject {
         configuration.overlayDuration = duration
     }
 
+    func updateOverlayPlacement(_ placement: OverlayPlacement) {
+        configuration.overlayPlacement = placement
+    }
+
     func shortcut(for assetID: String) -> HotkeyShortcut? {
         configuration.hotkeyAssignments[assetID]
     }
 
     func setShortcut(_ shortcut: HotkeyShortcut?, for assetID: String) {
-        var assignments = configuration.hotkeyAssignments
+        var updated = configuration
+        var assignments = updated.hotkeyAssignments
 
         if let shortcut {
             // Enforce one hotkey -> one SVG mapping to avoid ambiguous triggers.
             assignments = assignments.filter { $0.value != shortcut || $0.key == assetID }
+            if updated.clearHoldShortcut == shortcut {
+                updated.clearHoldShortcut = nil
+            }
             assignments[assetID] = shortcut
         } else {
             assignments.removeValue(forKey: assetID)
         }
 
-        configuration.hotkeyAssignments = assignments
+        updated.hotkeyAssignments = assignments
+        configuration = updated
+    }
+
+    func activationMode(for assetID: String) -> HotkeyActivationMode {
+        configuration.hotkeyModes[assetID] ?? .timed
+    }
+
+    func setActivationMode(_ mode: HotkeyActivationMode, for assetID: String) {
+        var modes = configuration.hotkeyModes
+        modes[assetID] = mode
+        configuration.hotkeyModes = modes
+    }
+
+    func clearHoldShortcut() -> HotkeyShortcut? {
+        configuration.clearHoldShortcut
+    }
+
+    func setClearHoldShortcut(_ shortcut: HotkeyShortcut?) {
+        var updated = configuration
+
+        if let shortcut {
+            updated.hotkeyAssignments = updated.hotkeyAssignments.filter { $0.value != shortcut }
+            updated.clearHoldShortcut = shortcut
+        } else {
+            updated.clearHoldShortcut = nil
+        }
+
+        configuration = updated
     }
 
     func hotkeyDescription(for shortcut: HotkeyShortcut?) -> String {
         guard let shortcut else {
             return "Unassigned"
+        }
+
+        if isModifierOnlyShortcut(shortcut) {
+            return keyTitle(for: shortcut)
         }
 
         var parts: [String] = []
@@ -227,19 +376,72 @@ final class AppSettings: ObservableObject {
         if shortcut.hasModifier(.maskSecondaryFn) { parts.append("Fn") }
         if shortcut.hasModifier(.maskAlphaShift) { parts.append("Caps") }
 
-        let keyTitle = KeyChoice.all.first(where: { UInt16($0.keyCode) == shortcut.keyCode })?.title ?? "KeyCode \(shortcut.keyCode)"
+        let keyTitle = keyTitle(for: shortcut)
         parts.append(keyTitle)
 
         return parts.joined(separator: " + ")
     }
 
+    private func isModifierOnlyShortcut(_ shortcut: HotkeyShortcut) -> Bool {
+        switch Int(shortcut.cgKeyCode) {
+        case kVK_Shift, kVK_RightShift:
+            return shortcut.cgModifiers == [.maskShift]
+        case kVK_Control, kVK_RightControl:
+            return shortcut.cgModifiers == [.maskControl]
+        case kVK_Option, kVK_RightOption:
+            return shortcut.cgModifiers == [.maskAlternate]
+        case kVK_Command, kVK_RightCommand:
+            return shortcut.cgModifiers == [.maskCommand]
+        case kVK_Function:
+            return shortcut.cgModifiers == [.maskSecondaryFn]
+        case kVK_CapsLock:
+            return shortcut.cgModifiers == [.maskAlphaShift]
+        default:
+            return false
+        }
+    }
+
+    private func keyTitle(for shortcut: HotkeyShortcut) -> String {
+        switch Int(shortcut.cgKeyCode) {
+        case kVK_Shift:
+            return "Left Shift"
+        case kVK_RightShift:
+            return "Right Shift"
+        case kVK_Control:
+            return "Left Ctrl"
+        case kVK_RightControl:
+            return "Right Ctrl"
+        case kVK_Option:
+            return "Left Opt"
+        case kVK_RightOption:
+            return "Right Opt"
+        case kVK_Command:
+            return "Left Cmd"
+        case kVK_RightCommand:
+            return "Right Cmd"
+        default:
+            return KeyChoice.all.first(where: { UInt16($0.keyCode) == shortcut.keyCode })?.title ?? "KeyCode \(shortcut.keyCode)"
+        }
+    }
+
     func syncSVGRepository() {
         guard !isSyncingRepository else { return }
 
+        let sourceType = configuration.svgSourceType
         let repoURL = configuration.repositoryURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !repoURL.isEmpty else {
-            repositorySyncMessage = "Enter a GitHub repository URL first."
-            return
+        let localDirectoryPath = configuration.localDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        switch sourceType {
+        case .repository:
+            guard !repoURL.isEmpty else {
+                repositorySyncMessage = "Enter a GitHub repository URL first."
+                return
+            }
+        case .localDirectory:
+            guard !localDirectoryPath.isEmpty else {
+                repositorySyncMessage = "Enter a local directory path first."
+                return
+            }
         }
 
         isSyncingRepository = true
@@ -249,34 +451,34 @@ final class AppSettings: ObservableObject {
             guard let self else { return }
 
             do {
-                let syncResult = try await syncService.sync(
-                    repositoryURL: repoURL,
-                    preferredBranch: configuration.repositoryBranch
-                )
-                let assets = syncResult.assets
-                let knownIDs = Set(assets.map(\.id))
+                let syncResult: SVGSyncResult
+                switch sourceType {
+                case .repository:
+                    syncResult = try await syncService.sync(
+                        repositoryURL: repoURL,
+                        preferredBranch: configuration.repositoryBranch
+                    )
+                case .localDirectory:
+                    syncResult = try syncService.sync(localDirectoryPath: localDirectoryPath)
+                }
 
-                var assignments = configuration.hotkeyAssignments
-                    .filter { knownIDs.contains($0.key) }
+                applySyncedAssets(syncResult.assets)
 
-                var usedShortcuts = Set(assignments.values)
-                for asset in assets {
-                    guard assignments[asset.id] == nil else { continue }
-
-                    if let auto = KeyChoice.defaultAssignmentOrder.first(where: { !usedShortcuts.contains($0) }) {
-                        assignments[asset.id] = auto
-                        usedShortcuts.insert(auto)
+                switch sourceType {
+                case .repository:
+                    if let branch = syncResult.branch, !branch.isEmpty {
+                        configuration.repositoryBranch = branch
+                        if !availableRepositoryBranches.contains(branch) {
+                            availableRepositoryBranches.append(branch)
+                            availableRepositoryBranches.sort()
+                        }
+                        repositorySyncMessage = "Found \(syncResult.assets.count) SVG file(s) on \(branch)."
+                    } else {
+                        repositorySyncMessage = "Found \(syncResult.assets.count) SVG file(s)."
                     }
+                case .localDirectory:
+                    repositorySyncMessage = "Found \(syncResult.assets.count) SVG file(s) in the local directory."
                 }
-
-                configuration.svgAssets = assets
-                configuration.repositoryBranch = syncResult.branch
-                configuration.hotkeyAssignments = assignments
-                if !availableRepositoryBranches.contains(syncResult.branch) {
-                    availableRepositoryBranches.append(syncResult.branch)
-                    availableRepositoryBranches.sort()
-                }
-                repositorySyncMessage = "Found \(assets.count) SVG file(s) on \(syncResult.branch)."
             } catch {
                 repositorySyncMessage = "Failed to sync SVGs: \(error.localizedDescription)"
             }
@@ -285,8 +487,74 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    private func normalizedAssetName(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private func applySyncedAssets(_ assets: [SVGAsset]) {
+        let previousAssetsByID = Dictionary(
+            uniqueKeysWithValues: configuration.svgAssets.map { ($0.id, $0) }
+        )
+        let previousFileNames = Set(configuration.svgAssets.map { normalizedAssetName($0.fileName) })
+
+        var previousShortcutsByFileName: [String: HotkeyShortcut] = [:]
+        for (assetID, shortcut) in configuration.hotkeyAssignments {
+            guard let asset = previousAssetsByID[assetID] else { continue }
+            previousShortcutsByFileName[normalizedAssetName(asset.fileName)] = shortcut
+        }
+
+        var previousModesByFileName: [String: HotkeyActivationMode] = [:]
+        for (assetID, mode) in configuration.hotkeyModes {
+            guard let asset = previousAssetsByID[assetID] else { continue }
+            previousModesByFileName[normalizedAssetName(asset.fileName)] = mode
+        }
+
+        var assignments: [String: HotkeyShortcut] = [:]
+        var modes: [String: HotkeyActivationMode] = [:]
+        var usedShortcuts: Set<HotkeyShortcut> = []
+
+        // Preserve shortcuts and modes when the SVG filename is unchanged.
+        for asset in assets {
+            let normalizedName = normalizedAssetName(asset.fileName)
+
+            if let preservedShortcut = previousShortcutsByFileName[normalizedName],
+               !usedShortcuts.contains(preservedShortcut) {
+                assignments[asset.id] = preservedShortcut
+                usedShortcuts.insert(preservedShortcut)
+            }
+
+            if let preservedMode = previousModesByFileName[normalizedName] {
+                modes[asset.id] = preservedMode
+            }
+        }
+
+        // Auto-assign only for truly new filenames.
+        for asset in assets where assignments[asset.id] == nil {
+            let normalizedName = normalizedAssetName(asset.fileName)
+            guard !previousFileNames.contains(normalizedName) else { continue }
+
+            if let auto = KeyChoice.defaultAssignmentOrder.first(where: { !usedShortcuts.contains($0) }) {
+                assignments[asset.id] = auto
+                usedShortcuts.insert(auto)
+            }
+        }
+
+        for asset in assets where modes[asset.id] == nil {
+            modes[asset.id] = .timed
+        }
+
+        configuration.svgAssets = assets
+        configuration.hotkeyAssignments = assignments
+        configuration.hotkeyModes = modes
+    }
+
     func refreshRepositoryBranches() {
         guard !isLoadingRepositoryBranches else { return }
+
+        guard configuration.svgSourceType == .repository else {
+            repositorySyncMessage = "Branches are only available for GitHub repositories."
+            return
+        }
 
         let repoURL = configuration.repositoryURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !repoURL.isEmpty else {
@@ -324,7 +592,21 @@ final class AppSettings: ObservableObject {
 
     private static func loadConfiguration(defaults: UserDefaults) -> AppConfiguration {
         if let data = defaults.data(forKey: DefaultsKey.configurationV2),
-           let decoded = try? JSONDecoder().decode(AppConfiguration.self, from: data) {
+           var decoded = try? JSONDecoder().decode(AppConfiguration.self, from: data) {
+            decoded.hotkeyAssignments = decoded.hotkeyAssignments.mapValues { shortcut in
+                if shortcut == .legacyNavigationLayerSignal {
+                    return .navigationLayerSignal
+                }
+                if shortcut == .legacySymbolLayerSignal {
+                    return .symbolLayerSignal
+                }
+                return shortcut
+            }
+            if decoded.clearHoldShortcut == nil ||
+                decoded.clearHoldShortcut == .legacyFirmwareReleaseSignal ||
+                decoded.clearHoldShortcut == .legacyChordFirmwareReleaseSignal {
+                decoded.clearHoldShortcut = .firmwareReleaseSignal
+            }
             return decoded
         }
 

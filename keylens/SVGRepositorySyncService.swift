@@ -9,6 +9,10 @@ enum SVGRepositorySyncError: LocalizedError {
     case missingDefaultBranch
     case missingImageDirectory
     case noSVGFilesFound
+    case missingLocalDirectoryPath
+    case localDirectoryNotFound
+    case localPathIsNotDirectory
+    case noSVGFilesFoundInDirectory
 
     var errorDescription: String? {
         switch self {
@@ -28,6 +32,14 @@ enum SVGRepositorySyncError: LocalizedError {
             return "Could not find keymap-drawer/img in the repository."
         case .noSVGFilesFound:
             return "No SVG files were found in keymap-drawer/img."
+        case .missingLocalDirectoryPath:
+            return "Enter a local directory path first."
+        case .localDirectoryNotFound:
+            return "The local directory does not exist."
+        case .localPathIsNotDirectory:
+            return "The selected local path is not a directory."
+        case .noSVGFilesFoundInDirectory:
+            return "No SVG files were found in the selected local directory."
         }
     }
 }
@@ -66,7 +78,7 @@ private struct GitHubContentEntry: Decodable {
 
 struct SVGSyncResult {
     let assets: [SVGAsset]
-    let branch: String
+    let branch: String?
 }
 
 struct RepositoryBranchCatalog {
@@ -118,6 +130,42 @@ final class SVGRepositorySyncService {
         }
 
         return SVGSyncResult(assets: assets, branch: branch)
+    }
+
+    func sync(localDirectoryPath: String) throws -> SVGSyncResult {
+        let trimmed = localDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw SVGRepositorySyncError.missingLocalDirectoryPath
+        }
+
+        let expandedPath = NSString(string: trimmed).expandingTildeInPath
+        let directoryURL = URL(fileURLWithPath: expandedPath, isDirectory: true)
+
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: directoryURL.path, isDirectory: &isDirectory) else {
+            throw SVGRepositorySyncError.localDirectoryNotFound
+        }
+
+        guard isDirectory.boolValue else {
+            throw SVGRepositorySyncError.localPathIsNotDirectory
+        }
+
+        let svgFiles = try listLocalSVGFiles(in: directoryURL)
+        guard !svgFiles.isEmpty else {
+            throw SVGRepositorySyncError.noSVGFilesFoundInDirectory
+        }
+
+        let assets = svgFiles.map { fileURL -> SVGAsset in
+            let normalizedURL = fileURL.standardizedFileURL
+            return SVGAsset(
+                id: "local:\(normalizedURL.path)",
+                fileName: normalizedURL.lastPathComponent,
+                sourceURL: normalizedURL.absoluteString,
+                localFilePath: normalizedURL.path
+            )
+        }
+
+        return SVGSyncResult(assets: assets, branch: nil)
     }
 
     func fetchBranches(repositoryURL: String) async throws -> RepositoryBranchCatalog {
@@ -323,6 +371,30 @@ final class SVGRepositorySyncService {
         }
 
         return directory
+    }
+
+    private func listLocalSVGFiles(in directory: URL) throws -> [URL] {
+        let contents = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+
+        return contents
+            .filter { fileURL in
+                guard fileURL.pathExtension.lowercased() == "svg" else {
+                    return false
+                }
+
+                var isDirectory: ObjCBool = false
+                guard fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory) else {
+                    return false
+                }
+                return !isDirectory.boolValue
+            }
+            .sorted {
+                $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending
+            }
     }
 
     private func makeURL(_ rawURL: String) throws -> URL {
