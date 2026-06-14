@@ -1,14 +1,21 @@
 # Xcode
 build/
+*.xcresult/
+*.xcarchive/
 *.pbxuser
 *.mode1v3
 *.mode2v3
 *.perspectivev3
+*.xcuserstate
 *.xcworkspace/xcuserdata/
 xcuserdata/
 *.xcodeproj/xcuserdata/
 DerivedData/
-.deriveddata
+.deriveddata/
+
+# Swift Package Manager
+.build/
+.swiftpm/
 
 # macOS
 .DS_Store
