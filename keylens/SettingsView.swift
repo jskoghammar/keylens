@@ -466,7 +466,7 @@ private final class HotkeyRecorderController: ObservableObject {
         case .flagsChanged:
             let keyCode = event.keyCode
 
-            guard let changedModifier = Self.modifierFlag(for: keyCode) else {
+            guard let changedModifier = KeyboardSemantics.modifierFlag(for: CGKeyCode(keyCode)) else {
                 return nil
             }
 
@@ -520,24 +520,6 @@ private final class HotkeyRecorderController: ObservableObject {
         return cgFlags
     }
 
-    private static func modifierFlag(for keyCode: UInt16) -> CGEventFlags? {
-        switch Int(keyCode) {
-        case kVK_Command, kVK_RightCommand:
-            return .maskCommand
-        case kVK_Option, kVK_RightOption:
-            return .maskAlternate
-        case kVK_Control, kVK_RightControl:
-            return .maskControl
-        case kVK_Shift, kVK_RightShift:
-            return .maskShift
-        case kVK_Function:
-            return .maskSecondaryFn
-        case kVK_CapsLock:
-            return .maskAlphaShift
-        default:
-            return nil
-        }
-    }
 }
 
 extension SettingsView {

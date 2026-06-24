@@ -142,7 +142,7 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
             pressedKeyCodes.remove(keyCode)
             currentModifiers = relevantFlags
         case .flagsChanged:
-            if let modifier = Self.modifierFlag(for: keyCode) {
+            if let modifier = KeyboardSemantics.modifierFlag(for: keyCode) {
                 if relevantFlags.contains(modifier) {
                     invalidateModifierTapCandidates(except: keyCode)
                     beginModifierTapCandidates(for: keyCode, flags: relevantFlags)
@@ -203,7 +203,7 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
             return false
         }
 
-        if let modifier = modifierFlag(for: shortcut.cgKeyCode) {
+        if let modifier = KeyboardSemantics.modifierFlag(for: shortcut.cgKeyCode) {
             return shortcut.cgModifiers.contains(modifier) &&
                 pressedKeyCodes.isEmpty &&
                 pressedModifierKeyCodes.contains(shortcut.cgKeyCode)
@@ -214,7 +214,7 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
 
     private func beginModifierTapCandidates(for keyCode: CGKeyCode, flags: CGEventFlags) {
         let candidates = bindings.keys.filter {
-            Self.isModifierOnlyShortcut($0) &&
+            KeyboardSemantics.isModifierOnlyShortcut($0) &&
                 $0.cgKeyCode == keyCode &&
                 $0.cgModifiers == flags
         }
@@ -243,11 +243,7 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
     }
 
     private static func isModifierOnlyShortcut(_ shortcut: HotkeyShortcut) -> Bool {
-        guard let modifier = modifierFlag(for: shortcut.cgKeyCode) else {
-            return false
-        }
-
-        return shortcut.cgModifiers.contains(modifier)
+        KeyboardSemantics.isModifierOnlyShortcut(shortcut)
     }
 
     private static func sortedShortcuts(_ shortcuts: Set<HotkeyShortcut>) -> [HotkeyShortcut] {
@@ -256,25 +252,6 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
                 return $0.modifiersRawValue < $1.modifiersRawValue
             }
             return $0.keyCode < $1.keyCode
-        }
-    }
-
-    private static func modifierFlag(for keyCode: CGKeyCode) -> CGEventFlags? {
-        switch Int(keyCode) {
-        case kVK_Command, kVK_RightCommand:
-            return .maskCommand
-        case kVK_Option, kVK_RightOption:
-            return .maskAlternate
-        case kVK_Control, kVK_RightControl:
-            return .maskControl
-        case kVK_Shift, kVK_RightShift:
-            return .maskShift
-        case kVK_Function:
-            return .maskSecondaryFn
-        case kVK_CapsLock:
-            return .maskAlphaShift
-        default:
-            return nil
         }
     }
 

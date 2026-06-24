@@ -3,7 +3,7 @@ import WebKit
 
 final class OverlayWindowController: NSWindowController {
     private let imageView = NSImageView()
-    private let webView = WKWebView()
+    private let webView = OverlayWindowController.makeWebView()
     private let dimmingView = NSView()
     private let assetContainerView = NSView()
     private let dimmingLayer = RadialDimmingLayer()
@@ -72,9 +72,15 @@ final class OverlayWindowController: NSWindowController {
         webView.isHidden = true
     }
 
-    func showAsset(at localPath: String, placement: OverlayPlacement, duration: TimeInterval? = nil) {
-        loadAsset(at: localPath)
+    @discardableResult
+    func showAsset(at localPath: String, placement: OverlayPlacement, duration: TimeInterval? = nil) -> Bool {
+        guard loadAsset(at: localPath) else {
+            hide()
+            return false
+        }
+
         show(placement: placement, duration: duration)
+        return true
     }
 
     func show(placement: OverlayPlacement, duration: TimeInterval? = nil) {
@@ -115,23 +121,25 @@ final class OverlayWindowController: NSWindowController {
         onHide?()
     }
 
-    private func loadAsset(at localPath: String) {
-        if localPath.lowercased().hasSuffix(".svg") {
-            loadSVG(at: localPath)
-            return
-        }
+    private func loadAsset(at localPath: String) -> Bool {
+        switch OverlayAssetRenderer.loadAsset(at: localPath) {
+        case .success(.svg(let asset)):
+            loadSVG(asset)
+            return true
 
-        if let image = NSImage(contentsOfFile: localPath) {
+        case .success(.imageFile(let url)):
+            guard let image = NSImage(contentsOf: url) else {
+                return false
+            }
             setImage(image)
+            return true
+
+        case .failure:
+            return false
         }
     }
 
-    private func loadSVG(at localPath: String) {
-        guard let svgData = try? Data(contentsOf: URL(fileURLWithPath: localPath)),
-              let svgBody = String(data: svgData, encoding: .utf8) else {
-            return
-        }
-
+    private func loadSVG(_ asset: OverlaySVGAsset) {
         let html = """
         <!doctype html>
         <html>
@@ -157,15 +165,21 @@ final class OverlayWindowController: NSWindowController {
             </style>
           </head>
           <body>
-            \(svgBody)
+            \(asset.body)
           </body>
         </html>
         """
 
         imageView.isHidden = true
         webView.isHidden = false
-        let baseURL = URL(fileURLWithPath: localPath).deletingLastPathComponent()
-        webView.loadHTMLString(html, baseURL: baseURL)
+        webView.loadHTMLString(html, baseURL: asset.baseURL)
+    }
+
+    private static func makeWebView() -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+        return WKWebView(frame: .zero, configuration: configuration)
     }
 
     private func updateFrameForCurrentScreen() {

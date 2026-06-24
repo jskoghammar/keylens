@@ -13,6 +13,7 @@ struct LayoutOverlayApp: App {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private enum TransientOverlayKind: Equatable {
         case timed
@@ -328,32 +329,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         interaction.releasePollTimer?.invalidate()
 
         let timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] timer in
-            guard let self else {
-                timer.invalidate()
-                return
-            }
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    timer.invalidate()
+                    return
+                }
 
-            guard let activeInteraction = self.tapHoldInteraction,
-                  activeInteraction.assetID == assetID,
-                  activeInteraction.token == token,
-                  activeInteraction.didActivateHold else {
-                timer.invalidate()
-                return
-            }
+                guard let activeInteraction = self.tapHoldInteraction,
+                      activeInteraction.assetID == assetID,
+                      activeInteraction.token == token,
+                      activeInteraction.didActivateHold else {
+                    timer.invalidate()
+                    return
+                }
 
-            guard let shortcut = activeInteraction.shortcut else {
-                timer.invalidate()
-                self.finishTapHoldInteraction(for: assetID)
-                return
-            }
+                guard let shortcut = activeInteraction.shortcut else {
+                    timer.invalidate()
+                    self.finishTapHoldInteraction(for: assetID)
+                    return
+                }
 
-            let isPressed =
-                self.hidKeyboardStateMonitor.isPressed(shortcut) ??
-                ShortcutPressState.isPressed(shortcut, keyState: ShortcutPressState.liveKeyState)
+                let isPressed =
+                    self.hidKeyboardStateMonitor.isPressed(shortcut) ??
+                    ShortcutPressState.isPressed(shortcut, keyState: ShortcutPressState.liveKeyState)
 
-            if !isPressed {
-                timer.invalidate()
-                self.finishTapHoldInteraction(for: assetID)
+                if !isPressed {
+                    timer.invalidate()
+                    self.finishTapHoldInteraction(for: assetID)
+                }
             }
         }
 
@@ -364,21 +367,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func reconcileOverlayState(using configuration: AppConfiguration) {
         let validAssetIDs = Set(configuration.svgAssets.map(\.id))
+        let result = OverlayStateReconciler.reconcile(
+            state: OverlayReconciliationState(
+                latchedAssetID: latchedOverlayAssetID,
+                hasTransientOverlay: transientOverlay != nil,
+                transientAssetID: transientOverlay?.assetID,
+                tapHoldAssetID: tapHoldInteraction?.assetID
+            ),
+            validAssetIDs: validAssetIDs
+        )
 
-        if let latchedOverlayAssetID, !validAssetIDs.contains(latchedOverlayAssetID) {
-            self.latchedOverlayAssetID = nil
-        }
+        latchedOverlayAssetID = result.state.latchedAssetID
 
-        if let transientOverlayAssetID = transientOverlay?.assetID,
-           !validAssetIDs.contains(transientOverlayAssetID) {
+        if result.state.hasTransientOverlay == false {
             transientOverlay = nil
-            oneShotDismissMonitor.stop()
-            overlayController?.hide()
         }
 
-        if let interactionAssetID = tapHoldInteraction?.assetID,
-           !validAssetIDs.contains(interactionAssetID) {
+        if result.shouldStopOneShotDismiss {
+            oneShotDismissMonitor.stop()
+        }
+
+        if result.shouldCancelTapHold {
             cancelTapHoldInteraction()
+        }
+
+        switch result.presentation {
+        case .hideOverlay:
+            overlayController?.hide()
+        case .presentLatchedOverlay(let assetID):
+            presentOverlay(assetID: assetID, duration: nil)
+        case nil:
+            break
         }
     }
 
@@ -610,31 +629,12 @@ private final class OneShotAnyKeyDismissMonitor {
 
     private static func isModifierPress(_ event: CGEvent) -> Bool {
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-        guard let changed = modifierFlag(for: keyCode) else {
+        guard let changed = KeyboardSemantics.modifierFlag(for: keyCode) else {
             // Treat unknown flagsChanged keys as presses (matches hotkey source behavior).
             return true
         }
         let currentFlags = event.flags.intersection(HotkeyShortcut.supportedModifiers)
         return currentFlags.contains(changed)
-    }
-
-    private static func modifierFlag(for keyCode: CGKeyCode) -> CGEventFlags? {
-        switch Int(keyCode) {
-        case kVK_Command, kVK_RightCommand:
-            return .maskCommand
-        case kVK_Option, kVK_RightOption:
-            return .maskAlternate
-        case kVK_Control, kVK_RightControl:
-            return .maskControl
-        case kVK_Shift, kVK_RightShift:
-            return .maskShift
-        case kVK_Function:
-            return .maskSecondaryFn
-        case kVK_CapsLock:
-            return .maskAlphaShift
-        default:
-            return nil
-        }
     }
 
     private static let eventTapCallback: CGEventTapCallBack = { _, type, event, userInfo in

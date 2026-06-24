@@ -237,6 +237,14 @@ struct KeyChoice: Identifiable, Hashable {
     }()
 }
 
+protocol SVGSyncing: AnyObject {
+    func sync(repositoryURL: String, preferredBranch: String?) async throws -> SVGSyncResult
+    func sync(localDirectoryPath: String) throws -> SVGSyncResult
+    func fetchBranches(repositoryURL: String) async throws -> RepositoryBranchCatalog
+}
+
+extension SVGRepositorySyncService: SVGSyncing {}
+
 @MainActor
 final class AppSettings: ObservableObject {
     static let shared = AppSettings(defaults: .standard, syncService: SVGRepositorySyncService())
@@ -255,7 +263,17 @@ final class AppSettings: ObservableObject {
 
     var onConfigurationChanged: ((AppConfiguration) -> Void)?
 
-    private let syncService: SVGRepositorySyncService
+    private let defaults: UserDefaults
+    private let syncService: SVGSyncing
+    private var syncOperationID: UUID?
+    private var branchLoadOperationID: UUID?
+
+    private struct SVGSyncSourceSnapshot: Equatable {
+        let sourceType: SVGSourceType
+        let repositoryURL: String
+        let repositoryBranch: String?
+        let localDirectoryPath: String
+    }
 
     private enum DefaultsKey {
         static let configurationV2 = "settings.configuration.v2"
@@ -266,7 +284,8 @@ final class AppSettings: ObservableObject {
         static let legacyDuration = "settings.overlay.duration"
     }
 
-    private init(defaults: UserDefaults, syncService: SVGRepositorySyncService) {
+    init(defaults: UserDefaults, syncService: SVGSyncing) {
+        self.defaults = defaults
         self.syncService = syncService
         configuration = Self.loadConfiguration(defaults: defaults)
     }
@@ -364,7 +383,7 @@ final class AppSettings: ObservableObject {
             return "Unassigned"
         }
 
-        if isModifierOnlyShortcut(shortcut) {
+        if KeyboardSemantics.isSingleModifierShortcut(shortcut) {
             return keyTitle(for: shortcut)
         }
 
@@ -382,108 +401,116 @@ final class AppSettings: ObservableObject {
         return parts.joined(separator: " + ")
     }
 
-    private func isModifierOnlyShortcut(_ shortcut: HotkeyShortcut) -> Bool {
-        switch Int(shortcut.cgKeyCode) {
-        case kVK_Shift, kVK_RightShift:
-            return shortcut.cgModifiers == [.maskShift]
-        case kVK_Control, kVK_RightControl:
-            return shortcut.cgModifiers == [.maskControl]
-        case kVK_Option, kVK_RightOption:
-            return shortcut.cgModifiers == [.maskAlternate]
-        case kVK_Command, kVK_RightCommand:
-            return shortcut.cgModifiers == [.maskCommand]
-        case kVK_Function:
-            return shortcut.cgModifiers == [.maskSecondaryFn]
-        case kVK_CapsLock:
-            return shortcut.cgModifiers == [.maskAlphaShift]
-        default:
-            return false
-        }
-    }
-
     private func keyTitle(for shortcut: HotkeyShortcut) -> String {
-        switch Int(shortcut.cgKeyCode) {
-        case kVK_Shift:
-            return "Left Shift"
-        case kVK_RightShift:
-            return "Right Shift"
-        case kVK_Control:
-            return "Left Ctrl"
-        case kVK_RightControl:
-            return "Right Ctrl"
-        case kVK_Option:
-            return "Left Opt"
-        case kVK_RightOption:
-            return "Right Opt"
-        case kVK_Command:
-            return "Left Cmd"
-        case kVK_RightCommand:
-            return "Right Cmd"
-        default:
-            return KeyChoice.all.first(where: { UInt16($0.keyCode) == shortcut.keyCode })?.title ?? "KeyCode \(shortcut.keyCode)"
+        if let modifierTitle = KeyboardSemantics.modifierKeyTitle(for: shortcut.cgKeyCode) {
+            return modifierTitle
         }
+
+        return KeyChoice.all.first(where: { UInt16($0.keyCode) == shortcut.keyCode })?.title ?? "KeyCode \(shortcut.keyCode)"
     }
 
     func syncSVGRepository() {
         guard !isSyncingRepository else { return }
 
-        let sourceType = configuration.svgSourceType
-        let repoURL = configuration.repositoryURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let localDirectoryPath = configuration.localDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let snapshot = currentSyncSourceSnapshot()
 
-        switch sourceType {
+        switch snapshot.sourceType {
         case .repository:
-            guard !repoURL.isEmpty else {
+            guard !snapshot.repositoryURL.isEmpty else {
                 repositorySyncMessage = "Enter a GitHub repository URL first."
                 return
             }
         case .localDirectory:
-            guard !localDirectoryPath.isEmpty else {
+            guard !snapshot.localDirectoryPath.isEmpty else {
                 repositorySyncMessage = "Enter a local directory path first."
                 return
             }
         }
 
+        let operationID = UUID()
+        syncOperationID = operationID
         isSyncingRepository = true
         repositorySyncMessage = nil
+        let syncService = self.syncService
 
-        Task { [weak self] in
-            guard let self else { return }
-
+        Task.detached(priority: .userInitiated) { [weak self, syncService, snapshot, operationID] in
             do {
                 let syncResult: SVGSyncResult
-                switch sourceType {
+                switch snapshot.sourceType {
                 case .repository:
                     syncResult = try await syncService.sync(
-                        repositoryURL: repoURL,
-                        preferredBranch: configuration.repositoryBranch
+                        repositoryURL: snapshot.repositoryURL,
+                        preferredBranch: snapshot.repositoryBranch
                     )
                 case .localDirectory:
-                    syncResult = try syncService.sync(localDirectoryPath: localDirectoryPath)
+                    syncResult = try syncService.sync(localDirectoryPath: snapshot.localDirectoryPath)
                 }
 
-                applySyncedAssets(syncResult.assets)
-
-                switch sourceType {
-                case .repository:
-                    if let branch = syncResult.branch, !branch.isEmpty {
-                        configuration.repositoryBranch = branch
-                        if !availableRepositoryBranches.contains(branch) {
-                            availableRepositoryBranches.append(branch)
-                            availableRepositoryBranches.sort()
-                        }
-                        repositorySyncMessage = "Found \(syncResult.assets.count) SVG file(s) on \(branch)."
-                    } else {
-                        repositorySyncMessage = "Found \(syncResult.assets.count) SVG file(s)."
-                    }
-                case .localDirectory:
-                    repositorySyncMessage = "Found \(syncResult.assets.count) SVG file(s) in the local directory."
-                }
+                await self?.finishSync(
+                    result: .success(syncResult),
+                    snapshot: snapshot,
+                    operationID: operationID
+                )
             } catch {
-                repositorySyncMessage = "Failed to sync SVGs: \(error.localizedDescription)"
+                await self?.finishSync(
+                    result: .failure(error),
+                    snapshot: snapshot,
+                    operationID: operationID
+                )
+            }
+        }
+    }
+
+    private func currentSyncSourceSnapshot() -> SVGSyncSourceSnapshot {
+        SVGSyncSourceSnapshot(
+            sourceType: configuration.svgSourceType,
+            repositoryURL: configuration.repositoryURL.trimmingCharacters(in: .whitespacesAndNewlines),
+            repositoryBranch: configuration.repositoryBranch?.trimmingCharacters(in: .whitespacesAndNewlines),
+            localDirectoryPath: configuration.localDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    private func finishSync(
+        result: Result<SVGSyncResult, Error>,
+        snapshot: SVGSyncSourceSnapshot,
+        operationID: UUID
+    ) {
+        guard syncOperationID == operationID else {
+            return
+        }
+
+        defer {
+            syncOperationID = nil
+            isSyncingRepository = false
+        }
+
+        guard currentSyncSourceSnapshot() == snapshot else {
+            repositorySyncMessage = nil
+            return
+        }
+
+        switch result {
+        case .success(let syncResult):
+            applySyncedAssets(syncResult.assets)
+
+            switch snapshot.sourceType {
+            case .repository:
+                if let branch = syncResult.branch, !branch.isEmpty {
+                    configuration.repositoryBranch = branch
+                    if !availableRepositoryBranches.contains(branch) {
+                        availableRepositoryBranches.append(branch)
+                        availableRepositoryBranches.sort()
+                    }
+                    repositorySyncMessage = "Found \(syncResult.assets.count) SVG file(s) on \(branch)."
+                } else {
+                    repositorySyncMessage = "Found \(syncResult.assets.count) SVG file(s)."
+                }
+            case .localDirectory:
+                repositorySyncMessage = "Found \(syncResult.assets.count) SVG file(s) in the local directory."
             }
 
-            isSyncingRepository = false
+        case .failure(let error):
+            repositorySyncMessage = "Failed to sync SVGs: \(error.localizedDescription)"
         }
     }
 
@@ -562,31 +589,66 @@ final class AppSettings: ObservableObject {
             return
         }
 
+        let operationID = UUID()
+        branchLoadOperationID = operationID
         isLoadingRepositoryBranches = true
         repositorySyncMessage = nil
+        let syncService = self.syncService
 
-        Task { [weak self] in
-            guard let self else { return }
-
+        Task.detached(priority: .userInitiated) { [weak self, syncService, repoURL, operationID] in
             do {
                 let catalog = try await syncService.fetchBranches(repositoryURL: repoURL)
-                availableRepositoryBranches = catalog.branches
-
-                if let selectedBranch = configuration.repositoryBranch,
-                   !catalog.branches.contains(selectedBranch) {
-                    configuration.repositoryBranch = nil
-                }
-
-                if configuration.repositoryBranch == nil, let preferred = catalog.urlBranch ?? catalog.defaultBranch {
-                    configuration.repositoryBranch = preferred
-                }
-
-                repositorySyncMessage = "Loaded \(catalog.branches.count) branch\(catalog.branches.count == 1 ? "" : "es")."
+                await self?.finishRepositoryBranches(
+                    result: .success(catalog),
+                    repositoryURL: repoURL,
+                    operationID: operationID
+                )
             } catch {
-                repositorySyncMessage = "Failed to load branches: \(error.localizedDescription)"
+                await self?.finishRepositoryBranches(
+                    result: .failure(error),
+                    repositoryURL: repoURL,
+                    operationID: operationID
+                )
+            }
+        }
+    }
+
+    private func finishRepositoryBranches(
+        result: Result<RepositoryBranchCatalog, Error>,
+        repositoryURL: String,
+        operationID: UUID
+    ) {
+        guard branchLoadOperationID == operationID else {
+            return
+        }
+
+        defer {
+            branchLoadOperationID = nil
+            isLoadingRepositoryBranches = false
+        }
+
+        guard configuration.repositoryURL.trimmingCharacters(in: .whitespacesAndNewlines) == repositoryURL else {
+            repositorySyncMessage = nil
+            return
+        }
+
+        switch result {
+        case .success(let catalog):
+            availableRepositoryBranches = catalog.branches
+
+            if let selectedBranch = configuration.repositoryBranch,
+               !catalog.branches.contains(selectedBranch) {
+                configuration.repositoryBranch = nil
             }
 
-            isLoadingRepositoryBranches = false
+            if configuration.repositoryBranch == nil, let preferred = catalog.urlBranch ?? catalog.defaultBranch {
+                configuration.repositoryBranch = preferred
+            }
+
+            repositorySyncMessage = "Loaded \(catalog.branches.count) branch\(catalog.branches.count == 1 ? "" : "es")."
+
+        case .failure(let error):
+            repositorySyncMessage = "Failed to load branches: \(error.localizedDescription)"
         }
     }
 
@@ -643,6 +705,6 @@ final class AppSettings: ObservableObject {
             return
         }
 
-        UserDefaults.standard.set(data, forKey: DefaultsKey.configurationV2)
+        defaults.set(data, forKey: DefaultsKey.configurationV2)
     }
 }

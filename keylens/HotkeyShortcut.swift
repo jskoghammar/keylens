@@ -38,14 +38,7 @@ struct HotkeyShortcut: Codable, Hashable {
         modifiers: [.maskControl, .maskAlternate, .maskCommand, .maskShift]
     )
 
-    nonisolated static let supportedModifiers: CGEventFlags = [
-        .maskCommand,
-        .maskAlternate,
-        .maskControl,
-        .maskShift,
-        .maskSecondaryFn,
-        .maskAlphaShift
-    ]
+    nonisolated static let supportedModifiers: CGEventFlags = KeyboardSemantics.supportedModifierFlags
 
     var keyCode: UInt16
     var modifiersRawValue: UInt64
