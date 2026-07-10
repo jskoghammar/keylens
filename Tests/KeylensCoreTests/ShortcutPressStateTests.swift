@@ -1,58 +1,62 @@
 import Carbon.HIToolbox
 import CoreGraphics
-import XCTest
+import Testing
 @testable import KeylensCore
 
-final class ShortcutPressStateTests: XCTestCase {
-    func testAltShortcutRequiresPrimaryKeyAndExactModifierMatch() {
+@Suite
+struct ShortcutPressStateTests {
+    @Test
+    func altShortcutRequiresPrimaryKeyAndExactModifierMatch() {
         let primaryKey = CGKeyCode(kVK_ANSI_S)
         let shortcut = HotkeyShortcut(
             keyCode: primaryKey,
             modifiers: [.maskAlternate]
         )
 
-        XCTAssertTrue(
+        #expect(
             ShortcutPressState.isPressed(shortcut, keyState: keyState([primaryKey, CGKeyCode(kVK_Option)]))
         )
-        XCTAssertFalse(
-            ShortcutPressState.isPressed(shortcut, keyState: keyState([primaryKey]))
+        #expect(
+            !ShortcutPressState.isPressed(shortcut, keyState: keyState([primaryKey]))
         )
-        XCTAssertFalse(
-            ShortcutPressState.isPressed(shortcut, keyState: keyState([primaryKey, CGKeyCode(kVK_Option), CGKeyCode(kVK_Shift)]))
+        #expect(
+            !ShortcutPressState.isPressed(shortcut, keyState: keyState([primaryKey, CGKeyCode(kVK_Option), CGKeyCode(kVK_Shift)]))
         )
     }
 
-    func testFnFunctionShortcutRequiresFunctionModifierToRemainHeld() {
+    @Test
+    func fnFunctionShortcutRequiresFunctionModifierToRemainHeld() {
         let shortcut = HotkeyShortcut(
             keyCode: CGKeyCode(kVK_F18),
             modifiers: [.maskSecondaryFn]
         )
 
-        XCTAssertTrue(
+        #expect(
             ShortcutPressState.isPressed(shortcut, keyState: keyState([CGKeyCode(kVK_F18), CGKeyCode(kVK_Function)]))
         )
-        XCTAssertFalse(
-            ShortcutPressState.isPressed(shortcut, keyState: keyState([CGKeyCode(kVK_F18)]))
+        #expect(
+            !ShortcutPressState.isPressed(shortcut, keyState: keyState([CGKeyCode(kVK_F18)]))
         )
-        XCTAssertFalse(
-            ShortcutPressState.isPressed(shortcut, keyState: keyState([CGKeyCode(kVK_F18), CGKeyCode(kVK_Function), CGKeyCode(kVK_Shift)]))
+        #expect(
+            !ShortcutPressState.isPressed(shortcut, keyState: keyState([CGKeyCode(kVK_F18), CGKeyCode(kVK_Function), CGKeyCode(kVK_Shift)]))
         )
     }
 
-    func testModifierOnlyShortcutStaysPressedOnlyWhileExactModifierStateMatches() {
+    @Test
+    func modifierOnlyShortcutStaysPressedOnlyWhileExactModifierStateMatches() {
         let shortcut = HotkeyShortcut(
             keyCode: CGKeyCode(kVK_Option),
             modifiers: [.maskAlternate]
         )
 
-        XCTAssertTrue(
+        #expect(
             ShortcutPressState.isPressed(shortcut, keyState: keyState([CGKeyCode(kVK_Option)]))
         )
-        XCTAssertFalse(
-            ShortcutPressState.isPressed(shortcut, keyState: keyState([]))
+        #expect(
+            !ShortcutPressState.isPressed(shortcut, keyState: keyState([]))
         )
-        XCTAssertFalse(
-            ShortcutPressState.isPressed(shortcut, keyState: keyState([CGKeyCode(kVK_Option), CGKeyCode(kVK_Shift)]))
+        #expect(
+            !ShortcutPressState.isPressed(shortcut, keyState: keyState([CGKeyCode(kVK_Option), CGKeyCode(kVK_Shift)]))
         )
     }
 

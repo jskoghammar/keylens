@@ -3,15 +3,12 @@ import WebKit
 
 final class OverlayWindowController: NSWindowController {
     private let imageView = NSImageView()
-    private let webView = OverlayWindowController.makeWebView()
+    private let webView = OverlayAssetRenderer.makeWebView()
     private let dimmingView = NSView()
     private let assetContainerView = NSView()
     private let dimmingLayer = RadialDimmingLayer()
-    private var hideTask: DispatchWorkItem?
     private(set) var isVisible = false
     private var currentPlacement: OverlayPlacement = .center
-
-    var onHide: (() -> Void)?
 
     init() {
         let initialFrame = NSScreen.main?.frame ?? .zero
@@ -73,18 +70,17 @@ final class OverlayWindowController: NSWindowController {
     }
 
     @discardableResult
-    func showAsset(at localPath: String, placement: OverlayPlacement, duration: TimeInterval? = nil) -> Bool {
+    func showAsset(at localPath: String, placement: OverlayPlacement) -> Bool {
         guard loadAsset(at: localPath) else {
             hide()
             return false
         }
 
-        show(placement: placement, duration: duration)
+        show(placement: placement)
         return true
     }
 
-    func show(placement: OverlayPlacement, duration: TimeInterval? = nil) {
-        hideTask?.cancel()
+    func show(placement: OverlayPlacement) {
         currentPlacement = placement
         updateFrameForCurrentScreen()
 
@@ -93,16 +89,6 @@ final class OverlayWindowController: NSWindowController {
         window.orderFrontRegardless()
         isVisible = true
 
-        guard let duration else {
-            hideTask = nil
-            return
-        }
-
-        let task = DispatchWorkItem { [weak self] in
-            self?.hide()
-        }
-        hideTask = task
-        DispatchQueue.main.asyncAfter(deadline: .now() + max(0.1, duration), execute: task)
     }
 
     func updatePlacement(_ placement: OverlayPlacement) {
@@ -112,13 +98,10 @@ final class OverlayWindowController: NSWindowController {
     }
 
     func hide() {
-        hideTask?.cancel()
-        hideTask = nil
         guard isVisible else { return }
 
         window?.orderOut(nil)
         isVisible = false
-        onHide?()
     }
 
     private func loadAsset(at localPath: String) -> Bool {
@@ -140,46 +123,9 @@ final class OverlayWindowController: NSWindowController {
     }
 
     private func loadSVG(_ asset: OverlaySVGAsset) {
-        let html = """
-        <!doctype html>
-        <html>
-          <head>
-            <meta charset=\"utf-8\" />
-            <style>
-              html, body {
-                margin: 0;
-                width: 100%;
-                height: 100%;
-                background: transparent;
-              }
-              body {
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                overflow: hidden;
-              }
-              svg {
-                max-width: 95vw;
-                max-height: 95vh;
-              }
-            </style>
-          </head>
-          <body>
-            \(asset.body)
-          </body>
-        </html>
-        """
-
         imageView.isHidden = true
         webView.isHidden = false
-        webView.loadHTMLString(html, baseURL: asset.baseURL)
-    }
-
-    private static func makeWebView() -> WKWebView {
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .nonPersistent()
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
-        return WKWebView(frame: .zero, configuration: configuration)
+        webView.loadHTMLString(asset.document, baseURL: nil)
     }
 
     private func updateFrameForCurrentScreen() {

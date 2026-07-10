@@ -5,7 +5,7 @@ let package = Package(
     name: "KeylensCore",
     defaultLocalization: "en",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v14)
     ],
     products: [
         .library(name: "KeylensCore", targets: ["KeylensCore"])
@@ -19,7 +19,6 @@ let package = Package(
                 "Assets.xcassets",
                 "Base.lproj",
                 "HIDKeyboardStateMonitor.swift",
-                "HotkeyMonitor.swift",
                 "InputMonitoringPermission.swift",
                 "OverlayWindowController.swift",
                 "SettingsView.swift",
@@ -28,10 +27,11 @@ let package = Package(
             sources: [
                 "AppConfiguration.swift",
                 "HIDShortcutPressState.swift",
+                "HotkeyMonitor.swift",
                 "HotkeyShortcut.swift",
                 "KeyboardSemantics.swift",
                 "OverlayAssetRenderer.swift",
-                "OverlayStateReconciler.swift",
+                "OverlayInteraction.swift",
                 "SVGRepositorySyncService.swift",
                 "ShortcutPressState.swift"
             ]

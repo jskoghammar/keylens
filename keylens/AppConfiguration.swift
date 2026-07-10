@@ -164,79 +164,6 @@ struct AppConfiguration: Codable, Equatable {
     }
 }
 
-struct KeyChoice: Identifiable, Hashable {
-    let keyCode: CGKeyCode
-    let title: String
-
-    var id: UInt16 { UInt16(keyCode) }
-
-    static let arrowKeys: [KeyChoice] = [
-        KeyChoice(keyCode: CGKeyCode(kVK_LeftArrow), title: "Left Arrow"),
-        KeyChoice(keyCode: CGKeyCode(kVK_RightArrow), title: "Right Arrow"),
-        KeyChoice(keyCode: CGKeyCode(kVK_UpArrow), title: "Up Arrow"),
-        KeyChoice(keyCode: CGKeyCode(kVK_DownArrow), title: "Down Arrow")
-    ]
-
-    static let letterKeys: [KeyChoice] = [
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_A), title: "A"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_B), title: "B"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_C), title: "C"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_D), title: "D"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_E), title: "E"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_F), title: "F"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_G), title: "G"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_H), title: "H"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_I), title: "I"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_J), title: "J"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_K), title: "K"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_L), title: "L"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_M), title: "M"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_N), title: "N"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_O), title: "O"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_P), title: "P"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_Q), title: "Q"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_R), title: "R"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_S), title: "S"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_T), title: "T"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_U), title: "U"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_V), title: "V"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_W), title: "W"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_X), title: "X"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_Y), title: "Y"),
-        KeyChoice(keyCode: CGKeyCode(kVK_ANSI_Z), title: "Z")
-    ]
-
-    static let functionKeys: [KeyChoice] = [
-        KeyChoice(keyCode: CGKeyCode(kVK_F1), title: "F1"),
-        KeyChoice(keyCode: CGKeyCode(kVK_F2), title: "F2"),
-        KeyChoice(keyCode: CGKeyCode(kVK_F3), title: "F3"),
-        KeyChoice(keyCode: CGKeyCode(kVK_F4), title: "F4"),
-        KeyChoice(keyCode: CGKeyCode(kVK_F5), title: "F5"),
-        KeyChoice(keyCode: CGKeyCode(kVK_F6), title: "F6"),
-        KeyChoice(keyCode: CGKeyCode(kVK_F7), title: "F7"),
-        KeyChoice(keyCode: CGKeyCode(kVK_F8), title: "F8"),
-        KeyChoice(keyCode: CGKeyCode(kVK_F9), title: "F9"),
-        KeyChoice(keyCode: CGKeyCode(kVK_F10), title: "F10"),
-        KeyChoice(keyCode: CGKeyCode(kVK_F11), title: "F11"),
-        KeyChoice(keyCode: CGKeyCode(kVK_F12), title: "F12"),
-        KeyChoice(keyCode: CGKeyCode(kVK_F13), title: "F13"),
-        KeyChoice(keyCode: CGKeyCode(kVK_F14), title: "F14"),
-        KeyChoice(keyCode: CGKeyCode(kVK_F15), title: "F15"),
-        KeyChoice(keyCode: CGKeyCode(kVK_F16), title: "F16"),
-        KeyChoice(keyCode: CGKeyCode(kVK_F17), title: "F17"),
-        KeyChoice(keyCode: CGKeyCode(kVK_F18), title: "F18"),
-        KeyChoice(keyCode: CGKeyCode(kVK_F19), title: "F19"),
-        KeyChoice(keyCode: CGKeyCode(kVK_F20), title: "F20")
-    ]
-
-    static let all: [KeyChoice] = arrowKeys + letterKeys + functionKeys
-
-    static let defaultAssignmentOrder: [HotkeyShortcut] = {
-        let preferred = arrowKeys + functionKeys + letterKeys
-        return preferred.map { HotkeyShortcut(keyCode: $0.keyCode, modifiers: []) }
-    }()
-}
-
 protocol SVGSyncing: AnyObject {
     func sync(repositoryURL: String, preferredBranch: String?) async throws -> SVGSyncResult
     func sync(localDirectoryPath: String) throws -> SVGSyncResult
@@ -376,37 +303,6 @@ final class AppSettings: ObservableObject {
         }
 
         configuration = updated
-    }
-
-    func hotkeyDescription(for shortcut: HotkeyShortcut?) -> String {
-        guard let shortcut else {
-            return "Unassigned"
-        }
-
-        if KeyboardSemantics.isSingleModifierShortcut(shortcut) {
-            return keyTitle(for: shortcut)
-        }
-
-        var parts: [String] = []
-        if shortcut.hasModifier(.maskCommand) { parts.append("Cmd") }
-        if shortcut.hasModifier(.maskAlternate) { parts.append("Opt") }
-        if shortcut.hasModifier(.maskControl) { parts.append("Ctrl") }
-        if shortcut.hasModifier(.maskShift) { parts.append("Shift") }
-        if shortcut.hasModifier(.maskSecondaryFn) { parts.append("Fn") }
-        if shortcut.hasModifier(.maskAlphaShift) { parts.append("Caps") }
-
-        let keyTitle = keyTitle(for: shortcut)
-        parts.append(keyTitle)
-
-        return parts.joined(separator: " + ")
-    }
-
-    private func keyTitle(for shortcut: HotkeyShortcut) -> String {
-        if let modifierTitle = KeyboardSemantics.modifierKeyTitle(for: shortcut.cgKeyCode) {
-            return modifierTitle
-        }
-
-        return KeyChoice.all.first(where: { UInt16($0.keyCode) == shortcut.keyCode })?.title ?? "KeyCode \(shortcut.keyCode)"
     }
 
     func syncSVGRepository() {
@@ -560,7 +456,7 @@ final class AppSettings: ObservableObject {
             let normalizedName = normalizedAssetName(asset.fileName)
             guard !previousFileNames.contains(normalizedName) else { continue }
 
-            if let auto = KeyChoice.defaultAssignmentOrder.first(where: { !usedShortcuts.contains($0) }) {
+            if let auto = KeyboardSemantics.defaultAssignmentOrder.first(where: { !usedShortcuts.contains($0) }) {
                 assignments[asset.id] = auto
                 usedShortcuts.insert(auto)
             }

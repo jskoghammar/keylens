@@ -1,5 +1,4 @@
 import AppKit
-import Carbon.HIToolbox
 import SwiftUI
 
 @main
@@ -15,56 +14,25 @@ struct LayoutOverlayApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private enum TransientOverlayKind: Equatable {
-        case timed
-        case oneShot
-        case hold
-    }
-
-    private struct TransientOverlayState {
-        let assetID: String?
-        let kind: TransientOverlayKind
-    }
-
-    private struct TapHoldInteraction {
-        let assetID: String
-        let token: UUID
-        let shortcut: HotkeyShortcut?
-        var didActivateHold = false
-        let holdTask: DispatchWorkItem
-        var releasePollTimer: Timer?
-    }
-
-    private struct PendingClearHoldCandidate {
-        let assetID: String
-        let previousLatchedOverlayAssetID: String?
-    }
-
     private let settings = AppSettings.shared
     private var overlayController: OverlayWindowController?
-    private var triggerController: TriggerController?
+    private var hotkeySource: HotkeyTriggerSource?
     private var statusItem: NSStatusItem?
     private var hotkeyStatusMenuItem: NSMenuItem?
     private lazy var settingsWindowController = SettingsWindowController()
     private let hidKeyboardStateMonitor = HIDKeyboardStateMonitor()
-    private let oneShotDismissMonitor = OneShotAnyKeyDismissMonitor()
-    private let tapHoldThreshold: TimeInterval = 0.5
-    private var latchedOverlayAssetID: String?
-    private var transientOverlay: TransientOverlayState?
-    private var tapHoldInteraction: TapHoldInteraction?
-    private var pendingClearHoldCandidate: PendingClearHoldCandidate?
+    private lazy var overlayInteraction = OverlayInteraction(configuration: settings.configuration)
+    private var overlayTasks: [UUID: DispatchWorkItem] = [:]
+    private var releasePollTimers: [UUID: Timer] = [:]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
         overlayController = OverlayWindowController()
         overlayController?.setImage(defaultOverlayImage())
-        overlayController?.onHide = { [weak self] in
-            self?.handleOverlayHidden()
-        }
 
         setupStatusMenu()
-        setupTriggerController()
+        setupHotkeySource()
         requestInputMonitoringPermissionAndStartHotkey()
 
         settings.onConfigurationChanged = { [weak self] configuration in
@@ -80,15 +48,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        cancelTapHoldInteraction()
-        oneShotDismissMonitor.stop()
-        triggerController?.stop()
+        cancelOverlayAdapters()
+        hotkeySource?.stop()
     }
 
     private func apply(configuration: AppConfiguration) {
-        triggerController?.update(configuration: configuration)
+        hotkeySource?.update(configuration: configuration)
         overlayController?.updatePlacement(configuration.overlayPlacement)
-        reconcileOverlayState(using: configuration)
+        send(.configurationChanged(configuration))
         setHotkeyActive(InputMonitoringPermission.hasAccess())
     }
 
@@ -97,308 +64,113 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showOverlayForConfiguredDuration() {
-        cancelTapHoldInteraction()
-        oneShotDismissMonitor.stop()
-        pendingClearHoldCandidate = nil
-        transientOverlay = TransientOverlayState(
-            assetID: settings.configuration.svgAssets.first?.id,
-            kind: .timed
-        )
-        presentOverlay(
-            assetID: settings.configuration.svgAssets.first?.id,
-            duration: settings.configuration.overlayDuration
-        )
-    }
-
-    private func presentOverlay(assetID: String?, duration: TimeInterval?) {
-        let placement = settings.configuration.overlayPlacement
-        guard let assetID else {
-            overlayController?.show(placement: placement, duration: duration)
-            return
-        }
-
-        guard let asset = settings.configuration.svgAssets.first(where: { $0.id == assetID }) else {
-            overlayController?.hide()
-            return
-        }
-
-        overlayController?.showAsset(
-            at: asset.localFilePath,
-            placement: placement,
-            duration: duration
-        )
+        send(.showConfiguredTimed)
     }
 
     private func handleHotkeyTrigger(_ event: TriggerEvent) {
         switch event.target {
         case .asset(let assetID):
-            if event.phase == .pressed {
-                pendingClearHoldCandidate = nil
-            }
-            handleAssetHotkeyTrigger(assetID: assetID, phase: event.phase)
+            send(event.phase == .pressed ? .assetPressed(assetID) : .assetReleased(assetID))
         case .clearHold:
-            guard event.phase == .pressed else { return }
-            if endActiveHoldOverlay() {
-                return
-            }
-            revertPendingClearHoldCandidate()
+            if event.phase == .pressed { send(.clearHoldPressed) }
         }
     }
 
-    private func handleAssetHotkeyTrigger(assetID: String, phase: TriggerPhase) {
-        let mode = settings.activationMode(for: assetID)
-
-        switch mode {
-        case .timed:
-            guard phase == .pressed else { return }
-            cancelTapHoldInteraction()
-            oneShotDismissMonitor.stop()
-            transientOverlay = TransientOverlayState(assetID: assetID, kind: .timed)
-            presentOverlay(assetID: assetID, duration: settings.configuration.overlayDuration)
-
-        case .toggle:
-            guard phase == .pressed else { return }
-            toggleLatchedOverlay(for: assetID)
-
-        case .tapHold:
-            handleTapHoldTrigger(assetID: assetID, phase: phase)
-
-        case .oneShot:
-            guard phase == .pressed else { return }
-            cancelTapHoldInteraction()
-            transientOverlay = TransientOverlayState(assetID: assetID, kind: .oneShot)
-            presentOverlay(assetID: assetID, duration: nil)
-            oneShotDismissMonitor.start { [weak self] in
-                self?.overlayController?.hide()
-            }
-        }
+    private func send(_ event: OverlayInteraction.Event) {
+        execute(overlayInteraction.handle(event))
     }
 
-    private func handleOverlayHidden() {
-        let shouldRestoreLatchedOverlay = transientOverlay != nil && latchedOverlayAssetID != nil
-        oneShotDismissMonitor.stop()
-        transientOverlay = nil
+    private func execute(_ effects: [OverlayInteraction.Effect]) {
+        var failedAssetIDs: [String] = []
 
-        if shouldRestoreLatchedOverlay {
-            presentOverlay(assetID: latchedOverlayAssetID, duration: nil)
-        }
-    }
-
-    private func toggleLatchedOverlay(for assetID: String) {
-        cancelTapHoldInteraction()
-        oneShotDismissMonitor.stop()
-        transientOverlay = nil
-
-        if latchedOverlayAssetID == assetID {
-            latchedOverlayAssetID = nil
-            overlayController?.hide()
-            return
-        }
-
-        latchedOverlayAssetID = assetID
-        presentOverlay(assetID: assetID, duration: nil)
-    }
-
-    private func handleTapHoldTrigger(assetID: String, phase: TriggerPhase) {
-        switch phase {
-        case .pressed:
-            beginTapHoldInteraction(for: assetID)
-        case .released:
-            finishTapHoldInteraction(for: assetID)
-        }
-    }
-
-    private func beginTapHoldInteraction(for assetID: String) {
-        cancelTapHoldInteraction()
-
-        let token = UUID()
-        let holdTask = DispatchWorkItem { [weak self] in
-            self?.activateTapHoldIfNeeded(assetID: assetID, token: token)
-        }
-
-        tapHoldInteraction = TapHoldInteraction(
-            assetID: assetID,
-            token: token,
-            shortcut: settings.shortcut(for: assetID),
-            holdTask: holdTask
-        )
-
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + tapHoldThreshold,
-            execute: holdTask
-        )
-    }
-
-    private func activateTapHoldIfNeeded(assetID: String, token: UUID) {
-        guard var interaction = tapHoldInteraction,
-              interaction.assetID == assetID,
-              interaction.token == token else {
-            return
-        }
-
-        interaction.didActivateHold = true
-        tapHoldInteraction = interaction
-
-        oneShotDismissMonitor.stop()
-        transientOverlay = TransientOverlayState(assetID: assetID, kind: .hold)
-        presentOverlay(assetID: assetID, duration: nil)
-        startTapHoldReleasePolling(for: assetID, token: token)
-    }
-
-    private func finishTapHoldInteraction(for assetID: String) {
-        guard let interaction = tapHoldInteraction,
-              interaction.assetID == assetID else {
-            return
-        }
-
-        interaction.holdTask.cancel()
-        interaction.releasePollTimer?.invalidate()
-        tapHoldInteraction = nil
-
-        if interaction.didActivateHold {
-            if latchedOverlayAssetID == assetID {
-                latchedOverlayAssetID = nil
-            }
-            if transientOverlay?.kind == .hold, transientOverlay?.assetID == assetID {
+        for effect in effects {
+            switch effect {
+            case .present(let assetID):
+                if !presentOverlayAsset(assetID), let assetID {
+                    failedAssetIDs.append(assetID)
+                }
+            case .hide:
                 overlayController?.hide()
+            case .schedule(let token, let delay):
+                scheduleOverlayEvent(token: token, delay: delay)
+            case .cancel(let token):
+                overlayTasks.removeValue(forKey: token)?.cancel()
+            case .startReleasePolling(let token, let shortcut):
+                startReleasePolling(token: token, shortcut: shortcut)
+            case .stopReleasePolling(let token):
+                stopReleasePolling(token: token)
+            case .armDismiss:
+                hotkeySource?.armAnyKeyDismiss { [weak self] in
+                    self?.send(.dismissKeyPressed)
+                }
+            case .disarmDismiss:
+                hotkeySource?.disarmAnyKeyDismiss()
             }
-            return
         }
 
-        let previousLatchedOverlayAssetID = latchedOverlayAssetID
-        toggleLatchedOverlay(for: assetID)
-
-        if settings.clearHoldShortcut() != nil {
-            pendingClearHoldCandidate = PendingClearHoldCandidate(
-                assetID: assetID,
-                previousLatchedOverlayAssetID: previousLatchedOverlayAssetID
-            )
+        for assetID in failedAssetIDs {
+            send(.presentationFailed(assetID))
         }
     }
 
-    private func cancelTapHoldInteraction() {
-        tapHoldInteraction?.holdTask.cancel()
-        tapHoldInteraction?.releasePollTimer?.invalidate()
-        tapHoldInteraction = nil
-    }
-
-    @discardableResult
-    private func endActiveHoldOverlay() -> Bool {
-        let isHoldingOverlay =
-            transientOverlay?.kind == .hold ||
-            tapHoldInteraction?.didActivateHold == true
-
-        guard isHoldingOverlay else {
+    private func presentOverlayAsset(_ assetID: String?) -> Bool {
+        let placement = settings.configuration.overlayPlacement
+        guard let assetID else {
+            overlayController?.show(placement: placement)
+            return true
+        }
+        guard let asset = settings.configuration.svgAssets.first(where: { $0.id == assetID }) else {
             return false
         }
-
-        cancelTapHoldInteraction()
-
-        if transientOverlay?.kind == .hold {
-            overlayController?.hide()
-        }
-
-        pendingClearHoldCandidate = nil
-        return true
+        return overlayController?.showAsset(
+            at: asset.localFilePath,
+            placement: placement
+        ) ?? false
     }
 
-    private func revertPendingClearHoldCandidate() {
-        guard let candidate = pendingClearHoldCandidate else {
-            return
+    private func scheduleOverlayEvent(token: UUID, delay: TimeInterval) {
+        overlayTasks.removeValue(forKey: token)?.cancel()
+        let task = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.overlayTasks.removeValue(forKey: token) != nil else { return }
+            self.send(.timerElapsed(token))
         }
-
-        pendingClearHoldCandidate = nil
-        latchedOverlayAssetID = candidate.previousLatchedOverlayAssetID
-        transientOverlay = nil
-        oneShotDismissMonitor.stop()
-
-        if let assetID = candidate.previousLatchedOverlayAssetID {
-            presentOverlay(assetID: assetID, duration: nil)
-        } else {
-            overlayController?.hide()
-        }
+        overlayTasks[token] = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: task)
     }
 
-    private func startTapHoldReleasePolling(for assetID: String, token: UUID) {
-        guard var interaction = tapHoldInteraction,
-              interaction.assetID == assetID,
-              interaction.token == token else {
-            return
-        }
-
-        interaction.releasePollTimer?.invalidate()
-
+    private func startReleasePolling(token: UUID, shortcut: HotkeyShortcut) {
+        stopReleasePolling(token: token)
         let timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] timer in
             Task { @MainActor [weak self] in
-                guard let self else {
+                guard let self,
+                      self.releasePollTimers[token] === timer else {
                     timer.invalidate()
-                    return
-                }
-
-                guard let activeInteraction = self.tapHoldInteraction,
-                      activeInteraction.assetID == assetID,
-                      activeInteraction.token == token,
-                      activeInteraction.didActivateHold else {
-                    timer.invalidate()
-                    return
-                }
-
-                guard let shortcut = activeInteraction.shortcut else {
-                    timer.invalidate()
-                    self.finishTapHoldInteraction(for: assetID)
                     return
                 }
 
                 let isPressed =
                     self.hidKeyboardStateMonitor.isPressed(shortcut) ??
                     ShortcutPressState.isPressed(shortcut, keyState: ShortcutPressState.liveKeyState)
-
                 if !isPressed {
-                    timer.invalidate()
-                    self.finishTapHoldInteraction(for: assetID)
+                    self.send(.releaseObserved(token))
                 }
             }
         }
-
         timer.tolerance = 0.02
-        interaction.releasePollTimer = timer
-        tapHoldInteraction = interaction
+        releasePollTimers[token] = timer
     }
 
-    private func reconcileOverlayState(using configuration: AppConfiguration) {
-        let validAssetIDs = Set(configuration.svgAssets.map(\.id))
-        let result = OverlayStateReconciler.reconcile(
-            state: OverlayReconciliationState(
-                latchedAssetID: latchedOverlayAssetID,
-                hasTransientOverlay: transientOverlay != nil,
-                transientAssetID: transientOverlay?.assetID,
-                tapHoldAssetID: tapHoldInteraction?.assetID
-            ),
-            validAssetIDs: validAssetIDs
-        )
+    private func stopReleasePolling(token: UUID) {
+        releasePollTimers.removeValue(forKey: token)?.invalidate()
+    }
 
-        latchedOverlayAssetID = result.state.latchedAssetID
-
-        if result.state.hasTransientOverlay == false {
-            transientOverlay = nil
-        }
-
-        if result.shouldStopOneShotDismiss {
-            oneShotDismissMonitor.stop()
-        }
-
-        if result.shouldCancelTapHold {
-            cancelTapHoldInteraction()
-        }
-
-        switch result.presentation {
-        case .hideOverlay:
-            overlayController?.hide()
-        case .presentLatchedOverlay(let assetID):
-            presentOverlay(assetID: assetID, duration: nil)
-        case nil:
-            break
-        }
+    private func cancelOverlayAdapters() {
+        overlayTasks.values.forEach { $0.cancel() }
+        overlayTasks.removeAll()
+        releasePollTimers.values.forEach { $0.invalidate() }
+        releasePollTimers.removeAll()
+        hotkeySource?.disarmAnyKeyDismiss()
     }
 
     private func setupStatusMenu() {
@@ -449,7 +221,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.terminate(nil)
     }
 
-    private func setupTriggerController() {
+    private func setupHotkeySource() {
         let hotkeySource = HotkeyTriggerSource(configuration: settings.configuration)
         hotkeySource.onStartError = { [weak self] message in
             self?.setHotkeyActive(false)
@@ -460,17 +232,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.showRuntimeHotkeyWarning(message)
         }
 
-        let triggerController = TriggerController(source: hotkeySource)
-        triggerController.onTrigger = { [weak self] event in
+        hotkeySource.onTrigger = { [weak self] event in
             self?.handleHotkeyTrigger(event)
         }
 
-        self.triggerController = triggerController
+        self.hotkeySource = hotkeySource
     }
 
     private func requestInputMonitoringPermissionAndStartHotkey() {
         if InputMonitoringPermission.requestAccessIfNeeded() {
-            triggerController?.start()
+            hotkeySource?.start()
             setHotkeyActive(true)
             return
         }
@@ -557,105 +328,5 @@ final class SettingsWindowController: NSWindowController {
     func show() {
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
-    }
-}
-
-private final class OneShotAnyKeyDismissMonitor {
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
-    private var onDismiss: (() -> Void)?
-    private var isArmed = false
-
-    func start(onDismiss: @escaping () -> Void) {
-        stop()
-
-        self.onDismiss = onDismiss
-        isArmed = false
-        let keyDownMask = CGEventMask(1 << CGEventType.keyDown.rawValue)
-        let flagsChangedMask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
-        let mask = keyDownMask | flagsChangedMask
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .listenOnly,
-            eventsOfInterest: mask,
-            callback: Self.eventTapCallback,
-            userInfo: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-        ) else {
-            NSLog("%@", "One-shot dismiss monitor failed to create event tap.")
-            return
-        }
-
-        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
-
-        eventTap = tap
-        runLoopSource = source
-
-        // Arm on the next run-loop turn so the triggering hotkey press itself
-        // does not immediately dismiss one-shot overlays.
-        DispatchQueue.main.async { [weak self] in
-            self?.isArmed = true
-        }
-    }
-
-    func stop() {
-        if let runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
-        }
-
-        runLoopSource = nil
-        eventTap = nil
-        onDismiss = nil
-        isArmed = false
-    }
-
-    deinit {
-        stop()
-    }
-
-    private func handle(event: CGEvent, type: CGEventType) {
-        guard isArmed else { return }
-
-        if type == .flagsChanged, !Self.isModifierPress(event) {
-            return
-        }
-
-        guard let onDismiss else { return }
-        stop()
-        onDismiss()
-    }
-
-    private static func isModifierPress(_ event: CGEvent) -> Bool {
-        let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-        guard let changed = KeyboardSemantics.modifierFlag(for: keyCode) else {
-            // Treat unknown flagsChanged keys as presses (matches hotkey source behavior).
-            return true
-        }
-        let currentFlags = event.flags.intersection(HotkeyShortcut.supportedModifiers)
-        return currentFlags.contains(changed)
-    }
-
-    private static let eventTapCallback: CGEventTapCallBack = { _, type, event, userInfo in
-        guard let userInfo else {
-            return Unmanaged.passUnretained(event)
-        }
-
-        let monitor = Unmanaged<OneShotAnyKeyDismissMonitor>.fromOpaque(userInfo).takeUnretainedValue()
-
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let tap = monitor.eventTap {
-                CGEvent.tapEnable(tap: tap, enable: true)
-            }
-            return Unmanaged.passUnretained(event)
-        }
-
-        guard type == .keyDown || type == .flagsChanged else {
-            return Unmanaged.passUnretained(event)
-        }
-
-        monitor.handle(event: event, type: type)
-        return Unmanaged.passUnretained(event)
     }
 }

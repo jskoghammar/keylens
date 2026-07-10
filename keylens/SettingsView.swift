@@ -282,7 +282,7 @@ struct SettingsView: View {
         let isRecording = recorder.recordingTarget == .asset(assetID)
         let title = isRecording
             ? "Press keys…"
-            : settings.hotkeyDescription(for: settings.shortcut(for: assetID))
+            : KeyboardSemantics.displayTitle(for: settings.shortcut(for: assetID))
 
         return Button {
             recorder.startRecording(for: .asset(assetID)) { shortcut in
@@ -310,7 +310,7 @@ struct SettingsView: View {
         let isRecording = recorder.recordingTarget == .clearHold
         let title = isRecording
             ? "Press keys…"
-            : settings.hotkeyDescription(for: settings.clearHoldShortcut())
+            : KeyboardSemantics.displayTitle(for: settings.clearHoldShortcut())
 
         return Button {
             recorder.startRecording(for: .clearHold) { shortcut in
@@ -456,7 +456,7 @@ private final class HotkeyRecorderController: ObservableObject {
 
             let shortcut = HotkeyShortcut(
                 keyCode: CGKeyCode(keyCode),
-                modifiers: Self.cgFlags(from: event.modifierFlags)
+                modifiers: KeyboardSemantics.cgEventFlags(from: event.modifierFlags)
             )
 
             onCapture?(shortcut)
@@ -470,7 +470,7 @@ private final class HotkeyRecorderController: ObservableObject {
                 return nil
             }
 
-            let flags = Self.cgFlags(from: event.modifierFlags)
+            let flags = KeyboardSemantics.cgEventFlags(from: event.modifierFlags)
             guard flags.contains(changedModifier) else {
                 // Modifier key-up events should not arm shortcuts.
                 return nil
@@ -492,32 +492,6 @@ private final class HotkeyRecorderController: ObservableObject {
         default:
             return event
         }
-    }
-
-    private static func cgFlags(from flags: NSEvent.ModifierFlags) -> CGEventFlags {
-        let relevant = flags.intersection([.command, .option, .control, .shift, .function, .capsLock])
-        var cgFlags: CGEventFlags = []
-
-        if relevant.contains(.command) {
-            cgFlags.insert(.maskCommand)
-        }
-        if relevant.contains(.option) {
-            cgFlags.insert(.maskAlternate)
-        }
-        if relevant.contains(.control) {
-            cgFlags.insert(.maskControl)
-        }
-        if relevant.contains(.shift) {
-            cgFlags.insert(.maskShift)
-        }
-        if relevant.contains(.function) {
-            cgFlags.insert(.maskSecondaryFn)
-        }
-        if relevant.contains(.capsLock) {
-            cgFlags.insert(.maskAlphaShift)
-        }
-
-        return cgFlags
     }
 
 }

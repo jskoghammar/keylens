@@ -1,3 +1,4 @@
+import AppKit
 import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
@@ -9,6 +10,46 @@ struct HIDUsageToken: Hashable {
 }
 
 enum KeyboardSemantics {
+    static var defaultAssignmentOrder: [HotkeyShortcut] {
+        KeyChoice.defaultAssignmentOrder
+    }
+
+    static func displayTitle(for shortcut: HotkeyShortcut?) -> String {
+        guard let shortcut else { return "Unassigned" }
+
+        if isSingleModifierShortcut(shortcut) {
+            return keyTitle(for: shortcut)
+        }
+
+        var parts: [String] = []
+        if shortcut.hasModifier(.maskCommand) { parts.append("Cmd") }
+        if shortcut.hasModifier(.maskAlternate) { parts.append("Opt") }
+        if shortcut.hasModifier(.maskControl) { parts.append("Ctrl") }
+        if shortcut.hasModifier(.maskShift) { parts.append("Shift") }
+        if shortcut.hasModifier(.maskSecondaryFn) { parts.append("Fn") }
+        if shortcut.hasModifier(.maskAlphaShift) { parts.append("Caps") }
+        parts.append(keyTitle(for: shortcut))
+        return parts.joined(separator: " + ")
+    }
+
+    static func cgEventFlags(from flags: NSEvent.ModifierFlags) -> CGEventFlags {
+        let relevant = flags.intersection([.command, .option, .control, .shift, .function, .capsLock])
+        var result: CGEventFlags = []
+        if relevant.contains(.command) { result.insert(.maskCommand) }
+        if relevant.contains(.option) { result.insert(.maskAlternate) }
+        if relevant.contains(.control) { result.insert(.maskControl) }
+        if relevant.contains(.shift) { result.insert(.maskShift) }
+        if relevant.contains(.function) { result.insert(.maskSecondaryFn) }
+        if relevant.contains(.capsLock) { result.insert(.maskAlphaShift) }
+        return result
+    }
+
+    private static func keyTitle(for shortcut: HotkeyShortcut) -> String {
+        modifierKeyTitle(for: shortcut.cgKeyCode) ??
+            KeyChoice.all.first { $0.keyCode == shortcut.cgKeyCode }?.title ??
+            "KeyCode \(shortcut.keyCode)"
+    }
+
     static let supportedModifiers: [CGEventFlags] = [
         .maskCommand,
         .maskAlternate,
@@ -195,6 +236,39 @@ enum KeyboardSemantics {
             return "Right Cmd"
         default:
             return nil
+        }
+    }
+
+    private struct KeyChoice {
+        let keyCode: CGKeyCode
+        let title: String
+
+        static let arrowKeys = [
+            KeyChoice(keyCode: CGKeyCode(kVK_LeftArrow), title: "Left Arrow"),
+            KeyChoice(keyCode: CGKeyCode(kVK_RightArrow), title: "Right Arrow"),
+            KeyChoice(keyCode: CGKeyCode(kVK_UpArrow), title: "Up Arrow"),
+            KeyChoice(keyCode: CGKeyCode(kVK_DownArrow), title: "Down Arrow")
+        ]
+
+        static let letterKeys = zip(
+            [
+                kVK_ANSI_A, kVK_ANSI_B, kVK_ANSI_C, kVK_ANSI_D, kVK_ANSI_E, kVK_ANSI_F,
+                kVK_ANSI_G, kVK_ANSI_H, kVK_ANSI_I, kVK_ANSI_J, kVK_ANSI_K, kVK_ANSI_L,
+                kVK_ANSI_M, kVK_ANSI_N, kVK_ANSI_O, kVK_ANSI_P, kVK_ANSI_Q, kVK_ANSI_R,
+                kVK_ANSI_S, kVK_ANSI_T, kVK_ANSI_U, kVK_ANSI_V, kVK_ANSI_W, kVK_ANSI_X,
+                kVK_ANSI_Y, kVK_ANSI_Z
+            ],
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        ).map { KeyChoice(keyCode: CGKeyCode($0), title: String($1)) }
+
+        static let functionKeys = [
+            kVK_F1, kVK_F2, kVK_F3, kVK_F4, kVK_F5, kVK_F6, kVK_F7, kVK_F8, kVK_F9, kVK_F10,
+            kVK_F11, kVK_F12, kVK_F13, kVK_F14, kVK_F15, kVK_F16, kVK_F17, kVK_F18, kVK_F19, kVK_F20
+        ].enumerated().map { KeyChoice(keyCode: CGKeyCode($1), title: "F\($0 + 1)") }
+
+        static let all = arrowKeys + letterKeys + functionKeys
+        static let defaultAssignmentOrder = (arrowKeys + functionKeys + letterKeys).map {
+            HotkeyShortcut(keyCode: $0.keyCode)
         }
     }
 }

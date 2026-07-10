@@ -16,52 +16,7 @@ enum TriggerPhase: Equatable {
     case released
 }
 
-protocol TriggerSource: AnyObject {
-    var onTrigger: ((TriggerEvent) -> Void)? { get set }
-    func start()
-    func stop()
-}
-
-protocol ConfigurableTriggerSource: TriggerSource {
-    func update(configuration: AppConfiguration)
-}
-
-final class TriggerController {
-    private var source: TriggerSource
-
-    var onTrigger: ((TriggerEvent) -> Void)? {
-        didSet {
-            source.onTrigger = onTrigger
-        }
-    }
-
-    init(source: TriggerSource) {
-        self.source = source
-    }
-
-    func start() {
-        source.onTrigger = onTrigger
-        source.start()
-    }
-
-    func stop() {
-        source.stop()
-    }
-
-    // Keeps the trigger implementation swappable for future external triggers (e.g. ZMK events).
-    func replaceSource(_ source: TriggerSource) {
-        self.source.stop()
-        self.source = source
-        self.source.onTrigger = onTrigger
-        self.source.start()
-    }
-
-    func update(configuration: AppConfiguration) {
-        (source as? ConfigurableTriggerSource)?.update(configuration: configuration)
-    }
-}
-
-final class HotkeyTriggerSource: ConfigurableTriggerSource {
+final class HotkeyTriggerSource {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var bindings: [HotkeyShortcut: TriggerTarget]
@@ -70,6 +25,7 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
     private var modifierTapCandidates: [CGKeyCode: Set<HotkeyShortcut>] = [:]
     private var currentModifiers: CGEventFlags = []
     private var activeShortcuts: Set<HotkeyShortcut> = []
+    private var anyKeyDismiss: (() -> Void)?
 
     var onTrigger: ((TriggerEvent) -> Void)?
     var onStartError: ((String) -> Void)?
@@ -121,6 +77,15 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
         modifierTapCandidates.removeAll()
         currentModifiers = []
         activeShortcuts.removeAll()
+        anyKeyDismiss = nil
+    }
+
+    func armAnyKeyDismiss(_ action: @escaping () -> Void) {
+        anyKeyDismiss = action
+    }
+
+    func disarmAnyKeyDismiss() {
+        anyKeyDismiss = nil
     }
 
     func update(configuration: AppConfiguration) {
@@ -129,9 +94,14 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
         modifierTapCandidates.removeAll()
     }
 
-    private func handle(event: CGEvent, type: CGEventType) {
+    func receive(event: CGEvent, type: CGEventType) {
+        if Self.isKeyPress(event: event, type: type), let action = anyKeyDismiss {
+            anyKeyDismiss = nil
+            action()
+        }
+
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-        let relevantFlags = event.flags.intersection(HotkeyShortcut.supportedModifiers)
+        let relevantFlags = event.flags.intersection(KeyboardSemantics.supportedModifierFlags)
 
         switch type {
         case .keyDown:
@@ -210,6 +180,21 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
         }
 
         return pressedKeyCodes.contains(shortcut.cgKeyCode)
+    }
+
+    private static func isKeyPress(event: CGEvent, type: CGEventType) -> Bool {
+        if type == .keyDown {
+            return event.getIntegerValueField(.keyboardEventAutorepeat) == 0
+        }
+        guard type == .flagsChanged else { return false }
+
+        let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+        if Int(keyCode) == kVK_CapsLock { return true }
+        guard let changedModifier = KeyboardSemantics.modifierFlag(for: keyCode) else {
+            return true
+        }
+        let flags = event.flags.intersection(KeyboardSemantics.supportedModifierFlags)
+        return flags.contains(changedModifier)
     }
 
     private func beginModifierTapCandidates(for keyCode: CGKeyCode, flags: CGEventFlags) {
@@ -293,7 +278,7 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
         }
 
         source.hasWarnedAboutUserInputDisable = false
-        source.handle(event: event, type: type)
+        source.receive(event: event, type: type)
 
         return Unmanaged.passUnretained(event)
     }
