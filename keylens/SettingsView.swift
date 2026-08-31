@@ -393,10 +393,6 @@ private final class HotkeyRecorderController: ObservableObject {
             return .maskControl
         case kVK_Shift, kVK_RightShift:
             return .maskShift
-        case kVK_Function:
-            return .maskSecondaryFn
-        case kVK_CapsLock:
-            return .maskAlphaShift
         default:
             return nil
         }

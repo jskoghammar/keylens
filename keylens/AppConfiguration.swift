@@ -8,9 +8,7 @@ struct HotkeyShortcut: Codable, Hashable {
         .maskCommand,
         .maskAlternate,
         .maskControl,
-        .maskShift,
-        .maskSecondaryFn,
-        .maskAlphaShift
+        .maskShift
     ]
 
     var keyCode: UInt16
@@ -136,7 +134,9 @@ struct KeyChoice: Identifiable, Hashable {
 
     static let defaultAssignmentOrder: [HotkeyShortcut] = {
         let preferred = arrowKeys + functionKeys + letterKeys
-        return preferred.map { HotkeyShortcut(keyCode: $0.keyCode, modifiers: []) }
+        return preferred.map {
+            HotkeyShortcut(keyCode: $0.keyCode, modifiers: [.maskControl, .maskAlternate])
+        }
     }()
 }
 
@@ -224,8 +224,6 @@ final class AppSettings: ObservableObject {
         if shortcut.hasModifier(.maskAlternate) { parts.append("Opt") }
         if shortcut.hasModifier(.maskControl) { parts.append("Ctrl") }
         if shortcut.hasModifier(.maskShift) { parts.append("Shift") }
-        if shortcut.hasModifier(.maskSecondaryFn) { parts.append("Fn") }
-        if shortcut.hasModifier(.maskAlphaShift) { parts.append("Caps") }
 
         let keyTitle = KeyChoice.all.first(where: { UInt16($0.keyCode) == shortcut.keyCode })?.title ?? "KeyCode \(shortcut.keyCode)"
         parts.append(keyTitle)
@@ -324,7 +322,14 @@ final class AppSettings: ObservableObject {
 
     private static func loadConfiguration(defaults: UserDefaults) -> AppConfiguration {
         if let data = defaults.data(forKey: DefaultsKey.configurationV2),
-           let decoded = try? JSONDecoder().decode(AppConfiguration.self, from: data) {
+           var decoded = try? JSONDecoder().decode(AppConfiguration.self, from: data) {
+            // Decoding reads modifiersRawValue verbatim, bypassing the supportedModifiers
+            // intersection in HotkeyShortcut.init. Drop any binding recorded before Fn/Caps
+            // were excluded rather than re-normalizing it to a bare key, which would recreate
+            // the unmodified-key hazard this same change fixes elsewhere.
+            decoded.hotkeyAssignments = decoded.hotkeyAssignments.filter {
+                $0.value.cgModifiers.isSubset(of: HotkeyShortcut.supportedModifiers)
+            }
             return decoded
         }
 
