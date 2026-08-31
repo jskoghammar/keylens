@@ -97,23 +97,40 @@ final class SVGRepositorySyncService {
             throw SVGRepositorySyncError.noSVGFilesFound
         }
 
-        let destination = try makeDestinationDirectory(owner: parsed.owner, repository: parsed.name, branch: branch)
+        // Download into a scratch directory first. Only once every file has downloaded
+        // successfully do we touch the real destination, so a network failure partway
+        // through never leaves the user with deleted local SVGs and no replacements.
+        let staging = try makeStagingDirectory()
+        var stagingConsumed = false
+        defer { if !stagingConsumed { try? fileManager.removeItem(at: staging) } }
 
-        var assets: [SVGAsset] = []
         for entry in svgEntries {
             guard let downloadURL = entry.downloadURL else { continue }
             let data = try await downloadFile(at: downloadURL)
+            try data.write(to: staging.appendingPathComponent(entry.name), options: .atomic)
+        }
 
-            let localURL = destination.appendingPathComponent(entry.name)
-            try data.write(to: localURL, options: .atomic)
+        let destination = try destinationDirectoryURL(owner: parsed.owner, repository: parsed.name, branch: branch)
+        let finalDirectory: URL
+        if fileManager.fileExists(atPath: destination.path) {
+            finalDirectory = try fileManager.replaceItemAt(destination, withItemAt: staging) ?? destination
+        } else {
+            try fileManager.createDirectory(
+                at: destination.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try fileManager.moveItem(at: staging, to: destination)
+            finalDirectory = destination
+        }
+        stagingConsumed = true
 
-            assets.append(
-                SVGAsset(
-                    id: entry.path,
-                    fileName: entry.name,
-                    sourceURL: downloadURL,
-                    localFilePath: localURL.path
-                )
+        let assets = svgEntries.compactMap { entry -> SVGAsset? in
+            guard let downloadURL = entry.downloadURL else { return nil }
+            return SVGAsset(
+                id: entry.path,
+                fileName: entry.name,
+                sourceURL: downloadURL,
+                localFilePath: finalDirectory.appendingPathComponent(entry.name).path
             )
         }
 
@@ -301,7 +318,7 @@ final class SVGRepositorySyncService {
         return data
     }
 
-    private func makeDestinationDirectory(owner: String, repository: String, branch: String) throws -> URL {
+    private func destinationDirectoryURL(owner: String, repository: String, branch: String) throws -> URL {
         let appSupport = try fileManager.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,
@@ -310,19 +327,27 @@ final class SVGRepositorySyncService {
         )
 
         let sanitized = "\(owner)_\(repository)_\(branch)".replacingOccurrences(of: "/", with: "_")
-        let directory = appSupport
+        return appSupport
             .appendingPathComponent("Keylens", isDirectory: true)
             .appendingPathComponent("DownloadedSVG", isDirectory: true)
             .appendingPathComponent(sanitized, isDirectory: true)
+    }
 
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+    private func makeStagingDirectory() throws -> URL {
+        let appSupport = try fileManager.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
 
-        let existing = (try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
-        for file in existing where file.pathExtension.lowercased() == "svg" {
-            try? fileManager.removeItem(at: file)
-        }
+        let staging = appSupport
+            .appendingPathComponent("Keylens", isDirectory: true)
+            .appendingPathComponent("StagingSVG", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
 
-        return directory
+        try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
+        return staging
     }
 
     private func makeURL(_ rawURL: String) throws -> URL {
