@@ -67,6 +67,10 @@ private struct GitHubContentEntry: Decodable {
 struct SVGSyncResult {
     let assets: [SVGAsset]
     let branch: String
+    /// nil when the branch carries no `keymap-drawer/layers.json` yet. Callers must
+    /// surface that: without a manifest nothing is auto-bound and only manually
+    /// assigned hotkeys fire.
+    let manifest: LayerManifest?
 }
 
 struct RepositoryBranchCatalog {
@@ -88,6 +92,7 @@ final class SVGRepositorySyncService {
         let parsed = try parseRepositoryURL(repositoryURL)
         let branch = try await resolveBranch(for: parsed, preferredBranch: preferredBranch)
         let entries = try await fetchImageEntries(owner: parsed.owner, repository: parsed.name, branch: branch)
+        let manifest = try await fetchLayerManifest(owner: parsed.owner, repository: parsed.name, branch: branch)
 
         let svgEntries = entries
             .filter { $0.type == "file" && $0.name.lowercased().hasSuffix(".svg") && $0.downloadURL != nil }
@@ -134,7 +139,7 @@ final class SVGRepositorySyncService {
             )
         }
 
-        return SVGSyncResult(assets: assets, branch: branch)
+        return SVGSyncResult(assets: assets, branch: branch, manifest: manifest)
     }
 
     func fetchBranches(repositoryURL: String) async throws -> RepositoryBranchCatalog {
@@ -302,6 +307,43 @@ final class SVGRepositorySyncService {
         }
 
         throw SVGRepositorySyncError.invalidServerResponse
+    }
+
+    /// Reads the generated manifest from the same branch as the SVGs, so a stale
+    /// branch pin yields a stale manifest whose commit sha exposes it.
+    /// Returns nil when the branch has no manifest at all.
+    private func fetchLayerManifest(owner: String, repository: String, branch: String) async throws -> LayerManifest? {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "api.github.com"
+        components.path = "/repos/\(owner)/\(repository)/contents/keymap-drawer/layers.json"
+        components.queryItems = [URLQueryItem(name: "ref", value: branch)]
+
+        guard let url = components.url else {
+            throw SVGRepositorySyncError.invalidRepositoryURL
+        }
+
+        var request = URLRequest(url: url)
+        request.addValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.addValue("Keylens", forHTTPHeaderField: "User-Agent")
+
+        let (data, response) = try await session.data(for: request)
+        let http = try validateJSONResponse(response)
+
+        if http.statusCode == 404 {
+            return nil
+        }
+
+        guard (200 ... 299).contains(http.statusCode) else {
+            throw SVGRepositorySyncError.invalidServerResponse
+        }
+
+        guard let entry = try? JSONDecoder().decode(GitHubContentEntry.self, from: data),
+              let downloadURL = entry.downloadURL else {
+            throw SVGRepositorySyncError.invalidServerResponse
+        }
+
+        return try LayerManifest.decode(try await downloadFile(at: downloadURL))
     }
 
     private func downloadFile(at rawURL: String) async throws -> Data {
