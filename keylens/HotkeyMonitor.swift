@@ -1,8 +1,18 @@
 import AppKit
 import Carbon.HIToolbox
 
+enum TriggerAction: Equatable {
+    /// A held layer: draw this asset and leave it up until a hide arrives.
+    case hold(assetID: String)
+    /// A hand-assigned hotkey: nothing will send a hide, so draw it for the
+    /// configured duration and let it time out.
+    case flash(assetID: String)
+    /// The resting layer's signal. Every momentary layer returns to it on release.
+    case hide
+}
+
 struct TriggerEvent {
-    let assetID: String
+    let action: TriggerAction
 }
 
 protocol TriggerSource: AnyObject {
@@ -50,10 +60,43 @@ final class TriggerController {
     }
 }
 
+/// Resolved bindings for the event tap. Split out so the lookup can be exercised
+/// without synthesizing CGEvents.
+struct TriggerBindings: Equatable {
+    var byShortcut: [HotkeyShortcut: TriggerAction] = [:]
+    /// Matched on key code alone, deliberately. The show bindings want exact modifier
+    /// matching -- that is what keeps a bare key from firing in every app. The resting
+    /// signal is a different kind of event: it means "dismiss whatever is up", and it
+    /// arrives whenever a layer is released, including while Shift or Cmd happens to be
+    /// held. Requiring bare modifiers there would let an overlay ride out the backstop
+    /// with the whole screen covered.
+    var hideKeyCode: UInt16?
+
+    func action(for shortcut: HotkeyShortcut) -> TriggerAction? {
+        if let hideKeyCode, shortcut.keyCode == hideKeyCode {
+            return .hide
+        }
+
+        return byShortcut[shortcut]
+    }
+
+    static func make(from configuration: AppConfiguration) -> TriggerBindings {
+        let availableAssetIDs = Set(configuration.svgAssets.map(\.id))
+        let heldAssetIDs = Set(configuration.layerAssetIDs)
+
+        var byShortcut: [HotkeyShortcut: TriggerAction] = [:]
+        for (assetID, shortcut) in configuration.hotkeyAssignments where availableAssetIDs.contains(assetID) {
+            byShortcut[shortcut] = heldAssetIDs.contains(assetID) ? .hold(assetID: assetID) : .flash(assetID: assetID)
+        }
+
+        return TriggerBindings(byShortcut: byShortcut, hideKeyCode: configuration.hideShortcut?.keyCode)
+    }
+}
+
 final class HotkeyTriggerSource: ConfigurableTriggerSource {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
-    private var bindings: [HotkeyShortcut: String]
+    private var bindings: TriggerBindings
 
     var onTrigger: ((TriggerEvent) -> Void)?
     var onStartError: ((String) -> Void)?
@@ -61,7 +104,7 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
     private var hasWarnedAboutUserInputDisable = false
 
     init(configuration: AppConfiguration) {
-        bindings = Self.bindingsMap(from: configuration)
+        bindings = TriggerBindings.make(from: configuration)
     }
 
     func start() {
@@ -102,7 +145,7 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
     }
 
     func update(configuration: AppConfiguration) {
-        bindings = Self.bindingsMap(from: configuration)
+        bindings = TriggerBindings.make(from: configuration)
     }
 
     private func handle(event: CGEvent, type: CGEventType) {
@@ -114,8 +157,8 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
         let relevantFlags = event.flags.intersection(HotkeyShortcut.supportedModifiers)
         let shortcut = HotkeyShortcut(keyCode: eventKeyCode, modifiers: relevantFlags)
 
-        guard let assetID = bindings[shortcut] else { return }
-        onTrigger?(TriggerEvent(assetID: assetID))
+        guard let action = bindings.action(for: shortcut) else { return }
+        onTrigger?(TriggerEvent(action: action))
     }
 
     private static func isModifierPress(_ event: CGEvent) -> Bool {
@@ -141,16 +184,6 @@ final class HotkeyTriggerSource: ConfigurableTriggerSource {
         default:
             return nil
         }
-    }
-
-    private static func bindingsMap(from configuration: AppConfiguration) -> [HotkeyShortcut: String] {
-        let availableAssetIDs = Set(configuration.svgAssets.map(\.id))
-
-        var map: [HotkeyShortcut: String] = [:]
-        for (assetID, shortcut) in configuration.hotkeyAssignments where availableAssetIDs.contains(assetID) {
-            map[shortcut] = assetID
-        }
-        return map
     }
 
     private static let eventTapCallback: CGEventTapCallBack = { _, type, event, userInfo in

@@ -65,12 +65,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         overlayController?.show(for: duration)
     }
 
-    private func showOverlay(for assetID: String) {
+    /// A held overlay is dismissed by the resting layer's signal, so the timeout is only
+    /// a backstop. If that signal is ever dropped -- a disconnect mid-hold, an event lost
+    /// to a disabled tap -- the overlay must not strand a window over everything with no
+    /// way to dismiss it.
+    private static let heldOverlayBackstop: TimeInterval = 30
+
+    private func showOverlay(for assetID: String, holding: Bool) {
         guard let asset = settings.configuration.svgAssets.first(where: { $0.id == assetID }) else {
             return
         }
 
-        overlayController?.showAsset(at: asset.localFilePath, for: settings.configuration.overlayDuration)
+        let duration = holding ? Self.heldOverlayBackstop : settings.configuration.overlayDuration
+        overlayController?.showAsset(at: asset.localFilePath, for: duration)
     }
 
     private func setupStatusMenu() {
@@ -134,7 +141,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let triggerController = TriggerController(source: hotkeySource)
         triggerController.onTrigger = { [weak self] event in
-            self?.showOverlay(for: event.assetID)
+            switch event.action {
+            case let .hold(assetID):
+                self?.showOverlay(for: assetID, holding: true)
+            case let .flash(assetID):
+                self?.showOverlay(for: assetID, holding: false)
+            case .hide:
+                self?.overlayController?.hide()
+            }
         }
 
         self.triggerController = triggerController

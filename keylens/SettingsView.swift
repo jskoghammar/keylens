@@ -122,6 +122,19 @@ struct SettingsView: View {
                 Text("\(settings.configuration.overlayDuration, specifier: "%.1f") seconds")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+
+                // With a resting signal bound, layer overlays follow the hold and this
+                // slider governs only hand-assigned hotkeys. Say so, or the setting looks
+                // broken the first time a held overlay ignores it.
+                if let hideShortcut = settings.configuration.hideShortcut {
+                    Text("Held layers stay up until released, then hide on \(settings.hotkeyDescription(for: hideShortcut)). The time above applies to hand-assigned hotkeys only.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("No resting-layer signal bound, so every overlay times out.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }

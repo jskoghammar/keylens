@@ -83,6 +83,8 @@ final class OverlayWindowController: NSWindowController {
     }
 
     func hide() {
+        hideTask?.cancel()
+        hideTask = nil
         window?.orderOut(nil)
     }
 
