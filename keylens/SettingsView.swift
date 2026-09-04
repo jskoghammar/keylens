@@ -85,6 +85,18 @@ struct SettingsView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
+
+                    // The sha the bindings came from. Shown so an overlay drawn from a
+                    // stale manifest can be spotted instead of silently trusted.
+                    if let commit = settings.configuration.manifestCommit {
+                        Text("Manifest: \(String(commit.prefix(7)))")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Manifest: none")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
                 }
 
                 if let message = settings.repositorySyncMessage, !message.isEmpty {
