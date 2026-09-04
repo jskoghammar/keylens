@@ -166,13 +166,6 @@ struct KeyChoice: Identifiable, Hashable {
     ]
 
     static let all: [KeyChoice] = arrowKeys + letterKeys + functionKeys
-
-    static let defaultAssignmentOrder: [HotkeyShortcut] = {
-        let preferred = arrowKeys + functionKeys + letterKeys
-        return preferred.map {
-            HotkeyShortcut(keyCode: $0.keyCode, modifiers: [.maskControl, .maskAlternate])
-        }
-    }()
 }
 
 extension KeyChoice {
@@ -339,27 +332,52 @@ final class AppSettings: ObservableObject {
                 let assets = syncResult.assets
                 let knownIDs = Set(assets.map(\.id))
 
-                var assignments = configuration.hotkeyAssignments
+                // Hotkeys are the manifest's to assign. Manual bindings survive only for
+                // assets it does not describe; nothing is auto-assigned into Rectangle's
+                // Ctrl+Opt namespace any more.
+                let manualAssignments = configuration.hotkeyAssignments
                     .filter { knownIDs.contains($0.key) }
 
-                var usedShortcuts = Set(assignments.values)
-                for asset in assets {
-                    guard assignments[asset.id] == nil else { continue }
+                var assignments = manualAssignments
+                var layerAssetIDs: [String] = []
+                var hideShortcut: HotkeyShortcut?
+                var summary = "Found \(assets.count) SVG file(s) on \(syncResult.branch)."
 
-                    if let auto = KeyChoice.defaultAssignmentOrder.first(where: { !usedShortcuts.contains($0) }) {
-                        assignments[asset.id] = auto
-                        usedShortcuts.insert(auto)
+                if let manifest = syncResult.manifest {
+                    let binding = try manifest.binding(
+                        for: assets,
+                        manualAssignments: manualAssignments
+                    )
+                    assignments = binding.assignments
+                    // Only manifest-bound assets hold; hand-assigned ones still time out,
+                    // since nothing will ever send a hide for them.
+                    layerAssetIDs = binding.layerAssetIDs
+                    hideShortcut = binding.hideShortcut
+                    summary += " Bound \(manifest.layers.count) layer(s) from manifest \(manifest.shortCommit)."
+                    if binding.hideShortcut == nil {
+                        summary += " No resting layer in the manifest, so overlays will time out rather than follow the hold."
                     }
+                    if !binding.unmatchedLayers.isEmpty {
+                        summary += " No SVG for: \(binding.unmatchedLayers.joined(separator: ", "))."
+                    }
+                    if !binding.droppedManualBindings.isEmpty {
+                        summary += " Dropped \(binding.droppedManualBindings.count) manual hotkey(s) whose shortcut was already taken."
+                    }
+                } else {
+                    summary += " No keymap-drawer/layers.json on this branch, so only manually assigned hotkeys will fire."
                 }
 
                 configuration.svgAssets = assets
                 configuration.repositoryBranch = syncResult.branch
                 configuration.hotkeyAssignments = assignments
+                configuration.manifestCommit = syncResult.manifest?.commit
+                configuration.layerAssetIDs = layerAssetIDs
+                configuration.hideShortcut = hideShortcut
                 if !availableRepositoryBranches.contains(syncResult.branch) {
                     availableRepositoryBranches.append(syncResult.branch)
                     availableRepositoryBranches.sort()
                 }
-                repositorySyncMessage = "Found \(assets.count) SVG file(s) on \(syncResult.branch)."
+                repositorySyncMessage = summary
             } catch {
                 repositorySyncMessage = "Failed to sync SVGs: \(error.localizedDescription)"
             }
