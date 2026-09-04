@@ -55,14 +55,49 @@ struct AppConfiguration: Codable, Equatable {
     var svgAssets: [SVGAsset]
     var hotkeyAssignments: [String: HotkeyShortcut]
     var overlayDuration: TimeInterval
+    /// Commit sha of the `layers.json` the current bindings came from, so an overlay
+    /// drawn from a stale manifest is visible rather than silently wrong. nil when the
+    /// synced branch carries no manifest.
+    var manifestCommit: String?
+    /// Assets bound to a held layer. Their overlays stay up until a hide arrives
+    /// instead of timing out.
+    var layerAssetIDs: [String]
+    /// The resting layer's signal, which dismisses the overlay. nil when no manifest
+    /// describes one, in which case every overlay times out as before.
+    var hideShortcut: HotkeyShortcut?
 
     static let `default` = AppConfiguration(
         repositoryURL: "",
         repositoryBranch: nil,
         svgAssets: [],
         hotkeyAssignments: [:],
-        overlayDuration: 1.2
+        overlayDuration: 1.2,
+        manifestCommit: nil,
+        layerAssetIDs: [],
+        hideShortcut: nil
     )
+}
+
+// In an extension so the memberwise init survives.
+extension AppConfiguration {
+    /// Decoded field by field rather than by synthesis, because `loadConfiguration`
+    /// treats any decode failure as "no config" and falls through to legacy migration.
+    /// A field added after blobs were already on disk would therefore not just default
+    /// -- it would silently wipe the repository, the assets and every hotkey. Anything
+    /// added from now on must be decoded with `decodeIfPresent`.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        repositoryURL = try container.decode(String.self, forKey: .repositoryURL)
+        repositoryBranch = try container.decodeIfPresent(String.self, forKey: .repositoryBranch)
+        svgAssets = try container.decode([SVGAsset].self, forKey: .svgAssets)
+        hotkeyAssignments = try container.decode([String: HotkeyShortcut].self, forKey: .hotkeyAssignments)
+        overlayDuration = try container.decode(TimeInterval.self, forKey: .overlayDuration)
+
+        manifestCommit = try container.decodeIfPresent(String.self, forKey: .manifestCommit)
+        layerAssetIDs = try container.decodeIfPresent([String].self, forKey: .layerAssetIDs) ?? []
+        hideShortcut = try container.decodeIfPresent(HotkeyShortcut.self, forKey: .hideShortcut)
+    }
 }
 
 struct KeyChoice: Identifiable, Hashable {
