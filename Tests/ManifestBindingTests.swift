@@ -164,6 +164,35 @@ struct ManifestBindingTests {
         // whole-struct decode in loadConfiguration ever fails, the user silently falls
         // through to legacy migration and loses their repo URL, branch and hotkeys --
         // so confirm v2 blobs written before this field still decode intact.
+        // The lookup the event tap actually performs -- previously untested, and where
+        // the hide signal was being missed.
+        print("trigger lookup")
+        var config = AppConfiguration.default
+        config.svgAssets = assets
+        config.hotkeyAssignments = [
+            "keymap-drawer/img/corne-sym.svg": HotkeyShortcut(keyCode: CGKeyCode(kVK_F14), modifiers: []),
+            "keymap-drawer/img/corne-base.svg": HotkeyShortcut(keyCode: CGKeyCode(kVK_ANSI_B), modifiers: [.maskControl])
+        ]
+        config.layerAssetIDs = ["keymap-drawer/img/corne-sym.svg"]
+        config.hideShortcut = HotkeyShortcut(keyCode: CGKeyCode(kVK_F13), modifiers: [])
+        let lookup = TriggerBindings.make(from: config)
+
+        check("manifest layer holds",
+              lookup.action(for: HotkeyShortcut(keyCode: CGKeyCode(kVK_F14), modifiers: []))
+                == .hold(assetID: "keymap-drawer/img/corne-sym.svg"))
+        check("hand-assigned hotkey flashes",
+              lookup.action(for: HotkeyShortcut(keyCode: CGKeyCode(kVK_ANSI_B), modifiers: [.maskControl]))
+                == .flash(assetID: "keymap-drawer/img/corne-base.svg"))
+        check("bare resting signal hides",
+              lookup.action(for: HotkeyShortcut(keyCode: CGKeyCode(kVK_F13), modifiers: [])) == .hide)
+        // The case that would have stranded a full-screen overlay for 30s.
+        check("resting signal hides even with a modifier incidentally held",
+              lookup.action(for: HotkeyShortcut(keyCode: CGKeyCode(kVK_F13), modifiers: [.maskShift])) == .hide)
+        check("show bindings still require exact modifiers",
+              lookup.action(for: HotkeyShortcut(keyCode: CGKeyCode(kVK_ANSI_B), modifiers: [])) == nil)
+        check("unbound key does nothing",
+              lookup.action(for: HotkeyShortcut(keyCode: CGKeyCode(kVK_F20), modifiers: [])) == nil)
+
         print("backward compatibility")
         let legacyBlob = """
         {"repositoryURL":"https://github.com/jskoghammar/corne_v4","repositoryBranch":"sym",

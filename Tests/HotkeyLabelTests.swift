@@ -4,7 +4,8 @@
 // can live here, so further checks belong in this file rather than a sibling.
 //
 //   swiftc -o /tmp/label-test \
-//     keylens/AppConfiguration.swift keylens/SVGRepositorySyncService.swift \
+//     keylens/LayerManifest.swift keylens/AppConfiguration.swift \
+//     keylens/SVGRepositorySyncService.swift \
 //     Tests/HotkeyLabelTests.swift && /tmp/label-test
 
 import Carbon.HIToolbox
