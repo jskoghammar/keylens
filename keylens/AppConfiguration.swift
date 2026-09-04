@@ -140,6 +140,65 @@ struct KeyChoice: Identifiable, Hashable {
     }()
 }
 
+extension KeyChoice {
+    /// Modifier keys can be bound on their own: the keyboard signals layer entry by
+    /// tapping a naked right-hand modifier, and the recorder captures that. They stay
+    /// out of `all` so nothing auto-assigns them, but they still need names -- without
+    /// one, a tap binding renders as "Ctrl + KeyCode 59" and reads as a mystery.
+    static let modifierKeyTitles: [UInt16: (title: String, flag: CGEventFlags)] = [
+        UInt16(kVK_Command): ("Left Command", .maskCommand),
+        UInt16(kVK_RightCommand): ("Right Command", .maskCommand),
+        UInt16(kVK_Option): ("Left Option", .maskAlternate),
+        UInt16(kVK_RightOption): ("Right Option", .maskAlternate),
+        UInt16(kVK_Control): ("Left Control", .maskControl),
+        UInt16(kVK_RightControl): ("Right Control", .maskControl),
+        UInt16(kVK_Shift): ("Left Shift", .maskShift),
+        UInt16(kVK_RightShift): ("Right Shift", .maskShift)
+    ]
+
+    /// Keys the recorder can capture but nothing auto-assigns. Escape and Delete are
+    /// absent on purpose: the recorder consumes them as cancel and clear, so they can
+    /// never reach a binding.
+    static let namedKeyTitles: [UInt16: String] = [
+        UInt16(kVK_Space): "Space",
+        UInt16(kVK_Return): "Return",
+        UInt16(kVK_Tab): "Tab"
+    ]
+
+    /// Human-readable form of a shortcut.
+    ///
+    /// A recorded modifier tap carries its own flag -- tapping Control yields keyCode
+    /// kVK_Control with .maskControl already set -- so the flag the key itself
+    /// contributes is dropped rather than rendered twice as "Ctrl + Left Control".
+    static func description(for shortcut: HotkeyShortcut) -> String {
+        let modifierKey = modifierKeyTitles[shortcut.keyCode]
+
+        var modifiers = shortcut.cgModifiers
+        if let contributed = modifierKey?.flag {
+            modifiers.remove(contributed)
+        }
+
+        var parts: [String] = []
+        if modifiers.contains(.maskCommand) { parts.append("Cmd") }
+        if modifiers.contains(.maskAlternate) { parts.append("Opt") }
+        if modifiers.contains(.maskControl) { parts.append("Ctrl") }
+        if modifiers.contains(.maskShift) { parts.append("Shift") }
+
+        if let modifierKey {
+            // "(tap)" is the point: this fires the moment the key goes down, on its own.
+            parts.append("\(modifierKey.title) (tap)")
+        } else {
+            parts.append(
+                all.first(where: { UInt16($0.keyCode) == shortcut.keyCode })?.title
+                    ?? namedKeyTitles[shortcut.keyCode]
+                    ?? "KeyCode \(shortcut.keyCode)"
+            )
+        }
+
+        return parts.joined(separator: " + ")
+    }
+}
+
 @MainActor
 final class AppSettings: ObservableObject {
     static let shared = AppSettings(defaults: .standard, syncService: SVGRepositorySyncService())
@@ -219,16 +278,7 @@ final class AppSettings: ObservableObject {
             return "Unassigned"
         }
 
-        var parts: [String] = []
-        if shortcut.hasModifier(.maskCommand) { parts.append("Cmd") }
-        if shortcut.hasModifier(.maskAlternate) { parts.append("Opt") }
-        if shortcut.hasModifier(.maskControl) { parts.append("Ctrl") }
-        if shortcut.hasModifier(.maskShift) { parts.append("Shift") }
-
-        let keyTitle = KeyChoice.all.first(where: { UInt16($0.keyCode) == shortcut.keyCode })?.title ?? "KeyCode \(shortcut.keyCode)"
-        parts.append(keyTitle)
-
-        return parts.joined(separator: " + ")
+        return KeyChoice.description(for: shortcut)
     }
 
     func syncSVGRepository() {
